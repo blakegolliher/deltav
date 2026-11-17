@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -77,7 +78,12 @@ func TestLoadgenDirectToFake(t *testing.T) {
 	if len(res.Backends) != 1 {
 		t.Errorf("backends = %v", res.Backends)
 	}
+	// The backend counts a response's bytes just after writing them, which
+	// can be a moment after the client has read them.
 	st := fake.Stats()
+	for deadline := time.Now().Add(2 * time.Second); st.BytesOut != 100*4096 && time.Now().Before(deadline); st = fake.Stats() {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if st.Requests != 200 || st.BytesIn != 100*4096 || st.BytesOut != 100*4096 || st.SigFailures != 0 {
 		t.Errorf("fake stats = %+v", st)
 	}
@@ -171,6 +177,39 @@ func TestInjectedFailures(t *testing.T) {
 				t.Errorf("fake stats = %+v", st)
 			}
 		})
+	}
+}
+
+// Every-Nth failures are exact and never consecutive.
+func TestEveryNthFailure(t *testing.T) {
+	endpoint, fake := startFake(t, FakeS3Config{Every403: 3, Every503: 7})
+	var codes []int
+	for i := 0; i < 42; i++ {
+		resp, err := http.Get(endpoint + "/bucket/key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		codes = append(codes, resp.StatusCode)
+	}
+	// Requests 7, 14, ... are 503; of the rest, 3, 6, 9, ... are 403.
+	for i, code := range codes {
+		n, want := i+1, 200
+		switch {
+		case n%7 == 0:
+			want = 503
+		case n%3 == 0:
+			want = 403
+		}
+		if code != want {
+			t.Errorf("request %d: %d, want %d", n, code, want)
+		}
+		if i > 0 && code == 503 && codes[i-1] == 503 {
+			t.Errorf("requests %d and %d are both 503", n-1, n)
+		}
+	}
+	if st := fake.Stats(); st.Injected503 != 6 || st.Injected403 != 12 {
+		t.Errorf("stats: %+v", st)
 	}
 }
 
@@ -303,5 +342,84 @@ func TestPercentileMS(t *testing.T) {
 	}
 	if got := percentileMS(d[:1], 0.99); got != 1 {
 		t.Errorf("single sample p99 = %v", got)
+	}
+}
+
+// memS3 is the least S3 that makes a round trip meaningful: it stores what
+// is PUT and returns it on GET. corrupt makes it return something else.
+type memS3 struct {
+	mu      sync.Mutex
+	objects map[string][]byte
+	corrupt bool
+	deletes int
+}
+
+func (m *memS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	raw, _, _ := strings.Cut(r.RequestURI, "?")
+	secret := func(k string) (string, bool) { return labCreds.SecretKey, k == labCreds.AccessKey }
+	if err := Verify(r, raw, secret, time.Now(), 15*time.Minute); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch r.Method {
+	case http.MethodPut:
+		b, _ := io.ReadAll(r.Body)
+		m.objects[raw] = b
+	case http.MethodGet:
+		b, ok := m.objects[raw]
+		if !ok {
+			http.Error(w, "NoSuchKey", http.StatusNotFound)
+			return
+		}
+		if m.corrupt && len(b) > 0 {
+			b = append([]byte{b[0] ^ 0xff}, b[1:]...)
+		}
+		_, _ = w.Write(b)
+	case http.MethodDelete:
+		delete(m.objects, raw)
+		m.deletes++
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func TestRoundtrip(t *testing.T) {
+	store := &memS3{objects: map[string][]byte{}}
+	srv := httptest.NewServer(store)
+	defer srv.Close()
+	cfg := LoadConfig{Endpoint: srv.URL, Bucket: "bucket", Creds: labCreds, Concurrency: 4, Requests: 40, Size: 10000, Roundtrip: true, Expect: true}
+
+	res := mustRun(t, cfg)
+	if res.Roundtrips != 40 || res.Requests != 40 || res.CheckFailures != 0 || res.TransportErrors != 0 {
+		t.Fatalf("round trips %d of %d, %d failures, %d transport errors:\n%s", res.Roundtrips, res.Requests, res.CheckFailures, res.TransportErrors, strings.Join(res.Samples, "\n"))
+	}
+	// Three requests per cycle, and nothing left behind.
+	if res.Status[200] != 80 || res.Status[204] != 40 || res.BytesSent != 400000 || res.BytesReceived != 400000 {
+		t.Errorf("status %v, %d bytes sent, %d received", res.Status, res.BytesSent, res.BytesReceived)
+	}
+	if len(store.objects) != 0 || store.deletes != 40 {
+		t.Errorf("%d objects left, %d deletes", len(store.objects), store.deletes)
+	}
+
+	// Bytes that come back different are a failure, and the object is
+	// still cleaned up.
+	store.corrupt = true
+	res = mustRun(t, cfg)
+	if res.Roundtrips != 0 || res.CheckFailures != 40 || !strings.Contains(res.Samples[0], "were stored") || len(store.objects) != 0 {
+		t.Errorf("corrupted GETs: %d verified, %d failures, %d objects left: %v", res.Roundtrips, res.CheckFailures, len(store.objects), res.Samples[:1])
+	}
+
+	// Wrong credentials: the PUT is refused and the cycle stops there.
+	bad := cfg
+	bad.Creds = &Credentials{AccessKey: labCreds.AccessKey, SecretKey: "wrong"}
+	res = mustRun(t, bad)
+	if res.Roundtrips != 0 || res.CheckFailures != 40 || res.Status[403] != 40 || !strings.Contains(res.Samples[0], "PUT answered 403") {
+		t.Errorf("wrong secret: %d verified, status %v, %v", res.Roundtrips, res.Status, res.Samples[:1])
+	}
+	both := cfg
+	both.Check = true
+	if _, err := RunLoad(context.Background(), both); err == nil {
+		t.Error("--check and --roundtrip together were accepted")
 	}
 }

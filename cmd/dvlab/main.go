@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"deltav/internal/lab"
+	"deltav/internal/vast"
 )
 
 func main() {
@@ -31,7 +34,7 @@ func main() {
 		SilenceErrors: true,
 	}
 	root.CompletionOptions.HiddenDefaultCmd = true
-	root.AddCommand(fakeS3Cmd(), loadgenCmd())
+	root.AddCommand(fakeS3Cmd(), loadgenCmd(), vastProbeCmd())
 	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "dvlab: %v\n", err)
 		os.Exit(1)
@@ -164,10 +167,13 @@ func loadgenCmd() *cobra.Command {
 					return err
 				}
 			} else {
-				printResult(res, cfg.Check)
+				printResult(res, cfg.Check, cfg.Roundtrip)
 			}
 			if res.CheckFailures > 0 {
 				return fmt.Errorf("%d checks failed", res.CheckFailures)
+			}
+			if cfg.Roundtrip && (res.Roundtrips != res.Requests || res.Requests == 0) {
+				return fmt.Errorf("%d of %d round trips verified", res.Roundtrips, res.Requests)
 			}
 			return nil
 		},
@@ -185,6 +191,7 @@ func loadgenCmd() *cobra.Command {
 	f.BoolVar(&cfg.SpecialKeys, "special-keys", false, "use keys a proxy could mangle: //, %2F, /./, +, space, unicode")
 	f.BoolVar(&cfg.Expect, "expect", false, "send and sign 'Expect: 100-continue' on PUTs, as S3 SDKs do")
 	f.BoolVar(&cfg.Check, "check", false, "verify each response against what was sent (dvlab fakes3 only)")
+	f.BoolVar(&cfg.Roundtrip, "roundtrip", false, "against a real S3 endpoint: PUT a new key, GET it back and compare, DELETE it; --requests then counts cycles")
 	f.DurationVar(&cfg.Timeout, "timeout", 60*time.Second, "per-request timeout")
 	f.StringVar(&access, "access-key", "", "sign requests with this access key (default $AWS_ACCESS_KEY_ID; unsigned if neither is set)")
 	f.StringVar(&secret, "secret-key", "", "secret for --access-key (default $AWS_SECRET_ACCESS_KEY; prefer the environment)")
@@ -193,7 +200,7 @@ func loadgenCmd() *cobra.Command {
 	return cmd
 }
 
-func printResult(r *lab.LoadResult, checked bool) {
+func printResult(r *lab.LoadResult, checked, roundtrip bool) {
 	rate := 0.0
 	if r.ElapsedSeconds > 0 {
 		rate = float64(r.Requests) / r.ElapsedSeconds
@@ -228,7 +235,117 @@ func printResult(r *lab.LoadResult, checked bool) {
 	if checked {
 		fmt.Printf("checks     %d failed\n", r.CheckFailures)
 	}
+	if r.Roundtrips > 0 || roundtrip {
+		fmt.Printf("roundtrips %d of %d verified (PUT, GET with matching bytes, DELETE)\n", r.Roundtrips, r.Requests)
+	}
 	for _, s := range r.Samples {
 		fmt.Printf("  %s\n", s)
+	}
+}
+
+// vastProbeCmd reads a live VAST cluster and writes sanitized fixtures. It
+// goes through internal/vast, whose transport can only issue GETs and token
+// calls, so it cannot change anything on the cluster.
+func vastProbeCmd() *cobra.Command {
+	var (
+		host, user, tenant, outDir string
+		insecure                   bool
+		paths                      []string
+	)
+	cmd := &cobra.Command{
+		Use:   "vastprobe",
+		Short: "Read a VAST cluster's API (GET only) and write sanitized test fixtures",
+		Long: "GET a few list endpoints from a VAST cluster's management API and write the responses\n" +
+			"to --out as JSON fixtures, with addresses, names, serials and other identifying values\n" +
+			"replaced (see internal/lab/sanitize.go). Only GETs and the token call are possible.\n\n" +
+			"The password is read from $VAST_PASSWORD and from nowhere else. A table of every field\n" +
+			"seen, its type and what was rewritten is printed; it contains no values. Read it and\n" +
+			"the fixtures before committing them.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if host == "" {
+				host = os.Getenv("VAST_HOST")
+			}
+			if user == "" {
+				user = os.Getenv("VAST_USER")
+			}
+			password := os.Getenv("VAST_PASSWORD")
+			if host == "" || user == "" || password == "" {
+				return errors.New("set VAST_HOST, VAST_USER and VAST_PASSWORD (host and user may be flags; the password may not)")
+			}
+			if outDir == "" {
+				return errors.New("--out is required")
+			}
+			client, err := vast.New(vast.Options{Host: host, User: user, Password: password, Tenant: tenant, Insecure: insecure})
+			if err != nil {
+				return err
+			}
+			docs := map[string]any{}
+			for _, p := range paths {
+				name := strings.ReplaceAll(strings.Trim(p, "/"), "/", "_")
+				raw, err := client.GetRaw(cmd.Context(), p)
+				if err != nil {
+					return err
+				}
+				dec := json.NewDecoder(bytes.NewReader(raw))
+				dec.UseNumber() // keep numbers exactly as the cluster wrote them
+				var doc any
+				if err := dec.Decode(&doc); err != nil {
+					return fmt.Errorf("GET %s: the response is not JSON: %w", p, err)
+				}
+				docs[name] = doc
+				fmt.Fprintf(os.Stderr, "GET /api/%s: %d bytes\n", strings.TrimPrefix(p, "/"), len(raw))
+			}
+			clean, report, err := lab.NewSanitizer(host).Sanitize(docs)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(outDir, 0o755); err != nil {
+				return err
+			}
+			for name, doc := range clean {
+				b, err := json.MarshalIndent(doc, "", "  ")
+				if err != nil {
+					return err
+				}
+				if err := os.WriteFile(filepath.Join(outDir, name+".json"), append(b, '\n'), 0o644); err != nil {
+					return err
+				}
+			}
+			printFieldReport(report)
+			fmt.Fprintf(os.Stderr, "wrote %d sanitized fixtures to %s\n", len(clean), outDir)
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&host, "host", "", "VAST management host (default $VAST_HOST)")
+	f.StringVar(&user, "user", "", "VAST user (default $VAST_USER)")
+	f.StringVar(&tenant, "tenant", "", "log in to this tenant instead of the default")
+	f.BoolVar(&insecure, "insecure", false, "skip certificate verification (lab clusters with self-signed certificates)")
+	f.StringVar(&outDir, "out", "", "directory to write the fixtures to, e.g. testdata/vast/lab1")
+	f.StringSliceVar(&paths, "path", []string{"cnodes/", "vippools/", "vips/"}, "API paths to GET, relative to /api/")
+	return cmd
+}
+
+// printFieldReport prints the shape of what was read: one line per field
+// with its JSON types, how many values and distinct values it had, and
+// which sanitizer rules rewrote how many of them. No values are printed.
+func printFieldReport(report []lab.FieldReport) {
+	doc := ""
+	for _, r := range report {
+		if r.Doc != doc {
+			doc = r.Doc
+			fmt.Printf("\n%s\n  %-44s %-14s %7s %9s  %s\n", doc, "FIELD", "TYPE", "VALUES", "DISTINCT", "REWRITTEN")
+		}
+		rules := make([]string, 0, len(r.Rules))
+		for name, n := range r.Rules {
+			rules = append(rules, fmt.Sprintf("%s:%d", name, n))
+		}
+		sort.Strings(rules)
+		path := r.Path
+		if path == "" {
+			path = "(top level)"
+		}
+		fmt.Printf("  %-44s %-14s %7d %9d  %s\n", path, strings.Join(r.Types, "|"), r.Count, r.Distinct, strings.Join(rules, " "))
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"deltav/internal/fleet"
 	"deltav/internal/lab"
 	"deltav/internal/server"
+	"deltav/internal/vast/vasttest"
 	"deltav/internal/version"
 	"deltav/internal/xds"
 )
@@ -121,6 +122,7 @@ func daemon(t *testing.T, targets ...xds.TargetSpec) *server.Server {
 	t.Helper()
 	s, err := server.New(server.Config{
 		GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", StaticTargets: targets,
+		StateDir: t.TempDir(), VASTPollInterval: 500 * time.Millisecond,
 		LoadReportInterval: time.Second, // the default 5s would make these tests slow
 		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -366,7 +368,7 @@ func TestStaticTargetThroughEnvoy(t *testing.T) {
 	go func() { _ = rf.Serve(ctx, refusing) }()
 	raddr := refusing.Addr().(*net.TCPAddr)
 	port2 := freePort(t)
-	if _, _, err := s.XDS().Update(context.Background(), []xds.TargetSpec{
+	if _, _, err := s.SetStaticTargets(context.Background(), []xds.TargetSpec{
 		{Name: "s3", ListenPort: port, Endpoints: eps},
 		{Name: "refusing", ListenPort: port2, Endpoints: []xds.Endpoint{{IP: raddr.IP.String(), Port: uint32(raddr.Port)}}},
 	}); err != nil {
@@ -397,7 +399,7 @@ func TestEndpointUpdateAndNACK(t *testing.T) {
 
 	// Remove the third endpoint: it must stop receiving requests.
 	target.Endpoints = eps[:2]
-	if _, changed, err := s.XDS().Update(context.Background(), []xds.TargetSpec{target}); err != nil || !changed {
+	if _, changed, err := s.SetStaticTargets(context.Background(), []xds.TargetSpec{target}); err != nil || !changed {
 		t.Fatalf("update: changed=%v err=%v", changed, err)
 	}
 	waitMember(t, s, "it-envoy-1", "in sync after removing an endpoint", inSync)
@@ -414,7 +416,7 @@ func TestEndpointUpdateAndNACK(t *testing.T) {
 	// A cluster Envoy cannot build: its CA file does not exist.
 	bad := xds.TargetSpec{Name: "broken", ListenPort: freePort(t), Endpoints: eps[:1],
 		TLS: &xds.TLSSpec{ServerName: "s3.example.com", CAFile: "/nonexistent/deltav-test-ca.pem"}}
-	if _, _, err := s.XDS().Update(context.Background(), []xds.TargetSpec{target, bad}); err != nil {
+	if _, _, err := s.SetStaticTargets(context.Background(), []xds.TargetSpec{target, bad}); err != nil {
 		t.Fatal(err)
 	}
 	m := waitMember(t, s, "it-envoy-1", "a NACK", func(m fleet.Member, _ fleetResponse) bool {
@@ -433,7 +435,7 @@ func TestEndpointUpdateAndNACK(t *testing.T) {
 	requireClean(t, load(t, port, nil))
 
 	// Withdraw the bad target: Envoy recovers.
-	if _, _, err := s.XDS().Update(context.Background(), []xds.TargetSpec{target}); err != nil {
+	if _, _, err := s.SetStaticTargets(context.Background(), []xds.TargetSpec{target}); err != nil {
 		t.Fatal(err)
 	}
 	waitMember(t, s, "it-envoy-1", "in sync after the bad target is withdrawn", inSync)
@@ -532,9 +534,13 @@ func targetInFlight(t *testing.T, s *server.Server) uint64 {
 func TestTelemetryThroughEnvoy(t *testing.T) {
 	const slow = 300 * time.Millisecond
 	eps, fakes := backendsWith(t,
-		lab.FakeS3Config{},                             // 0: healthy and fast
-		lab.FakeS3Config{Latency: slow},                // 1: healthy and slow
-		lab.FakeS3Config{Rate403: 0.30, Rate503: 0.15}, // 2: refuses nearly half
+		lab.FakeS3Config{},              // 0: healthy and fast
+		lab.FakeS3Config{Latency: slow}, // 1: healthy and slow
+		// 2: refuses a third with 403 and a seventh with 503, never two
+		// 503s in a row. A random 15% of 503s got this backend ejected by
+		// outlier detection after 17 requests in one run (DESIGN.md,
+		// amendment 17), which is real but not what this test is about.
+		lab.FakeS3Config{Every403: 3, Every503: 7},
 	)
 	names := make([]string, len(eps))
 	for i, e := range eps {
@@ -687,5 +693,162 @@ func TestTelemetryThroughEnvoy(t *testing.T) {
 		if !strings.Contains(string(body), want+"\n") {
 			t.Errorf("/metrics lacks: %s", want)
 		}
+	}
+}
+
+func postAPI(t *testing.T, s *server.Server, path string, body any) {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post("http://"+s.HTTPAddr()+path, "application/json", strings.NewReader(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		msg, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST %s: status %d: %s", path, resp.StatusCode, msg)
+	}
+}
+
+type cnodeRow struct {
+	Name     string        `json:"name"`
+	Healthy  bool          `json:"healthy"`
+	VIPs     int           `json:"vips"`
+	Stats    summary       `json:"stats"`
+	VIPRows  []endpointRow `json:"endpoints"`
+	InFlight uint64        `json:"in_flight"`
+}
+
+func cnodeRows(t *testing.T, s *server.Server) map[string]cnodeRow {
+	t.Helper()
+	resp := getAPI[struct {
+		CNodes []cnodeRow `json:"cnodes"`
+	}](t, s, "/api/v1/cnodes?window=5m")
+	out := map[string]cnodeRow{}
+	for _, c := range resp.CNodes {
+		out[c.Name] = c
+	}
+	return out
+}
+
+// Milestone 4: endpoints come from a VAST cluster. The mock VAST serves a
+// real cluster's (sanitized) responses, with the six VIPs of pool "main"
+// pointed at six fake S3 backends. Requests through Envoy spread over the
+// VIPs; telemetry rolls up per CNode; and when VAST reports a CNode out of
+// service, Envoy stops using its VIPs.
+func TestVASTTargetThroughEnvoy(t *testing.T) {
+	eps, fakes := backends(t, 6)
+	mock, err := vasttest.New(filepath.Join("..", "..", "testdata", "vast", "v5.5.3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	ips := make([]string, len(eps))
+	for i, e := range eps {
+		ips[i] = e.IP
+		if e.Port != eps[0].Port {
+			t.Skip("the backends could not share one port on this host (no 127.0.0.11-16); a VIP pool has one port")
+		}
+	}
+	if err := mock.SetPoolVIPs("main", ips); err != nil {
+		t.Fatal(err)
+	}
+	// Which backend sits behind which CNode, as VAST reports it.
+	cnodeOf := mock.PoolCNodes("main")
+	byCNode := map[string][]int{}
+	for i, name := range cnodeOf {
+		byCNode[name] = append(byCNode[name], i)
+	}
+	if len(byCNode) != 3 {
+		t.Fatalf("pool main spans %d CNodes in the fixtures, want 3", len(byCNode))
+	}
+
+	port := freePort(t)
+	s := daemon(t)
+	postAPI(t, s, "/api/v1/vast", map[string]any{
+		"name": "lab", "host": mock.Host(), "user": vasttest.User, "password": vasttest.Password, "insecure": true,
+	})
+	postAPI(t, s, "/api/v1/targets", map[string]any{
+		"name": "main", "cluster": "lab", "pool": "main", "port": eps[0].Port, "listen_port": port,
+	})
+	envoy(t, s, "it-envoy-1")
+	waitMember(t, s, "it-envoy-1", "connected and in sync", inSync)
+	waitListener(t, port)
+
+	res := load(t, port, func(c *lab.LoadConfig) { c.Requests = 600 })
+	requireClean(t, res)
+	if len(res.Backends) != 6 {
+		t.Errorf("load reached %d of 6 VIPs: %v", len(res.Backends), res.Backends)
+	}
+
+	// Per-CNode rollups: each CNode's requests are those of its two VIPs.
+	var rows map[string]cnodeRow
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		rows = cnodeRows(t, s)
+		var total uint64
+		for _, c := range rows {
+			total += c.Stats.Requests
+		}
+		if total == uint64(res.Requests) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	for name, idx := range byCNode {
+		var want uint64
+		for _, i := range idx {
+			want += uint64(fakes[i].Stats().Requests)
+		}
+		c := rows[name]
+		t.Logf("%s: VIPs %d, API counts %d requests, its backends %d", name, c.VIPs, c.Stats.Requests, want)
+		if !c.Healthy || c.VIPs != len(idx) || len(c.VIPRows) != len(idx) || c.Stats.Requests != want || want == 0 {
+			t.Errorf("%s: healthy %v, %d VIPs, %d VIP rows, %d requests; want healthy, %d VIPs, %d requests",
+				name, c.Healthy, c.VIPs, len(c.VIPRows), c.Stats.Requests, len(idx), want)
+		}
+	}
+
+	// VAST reports one CNode out of service. Within a poll or two, Envoy
+	// has four endpoints and that CNode's VIPs get nothing more.
+	var down string
+	for name := range byCNode {
+		if down == "" || name < down {
+			down = name
+		}
+	}
+	if err := mock.SetCNode(down, "INACTIVE", true); err != nil {
+		t.Fatal(err)
+	}
+	waitMember(t, s, "it-envoy-1", "in sync with four endpoints", func(m fleet.Member, f fleetResponse) bool {
+		targets := getAPI[struct {
+			Targets []struct {
+				Endpoints []struct{} `json:"endpoints"`
+			} `json:"targets"`
+		}](t, s, "/api/v1/targets").Targets
+		return len(targets) == 1 && len(targets[0].Endpoints) == 4 && inSync(m, f)
+	})
+	before := make([]int64, len(fakes))
+	for i, f := range fakes {
+		before[i] = f.Stats().Requests
+	}
+	res = load(t, port, func(c *lab.LoadConfig) { c.Requests = 400 })
+	requireClean(t, res)
+	for i, f := range fakes {
+		got := f.Stats().Requests - before[i]
+		if cnodeOf[i] == down && got != 0 {
+			t.Errorf("VIP %s on %s (out of service) received %d more requests", ips[i], down, got)
+		}
+		if cnodeOf[i] != down && got == 0 {
+			t.Errorf("VIP %s on %s received nothing", ips[i], cnodeOf[i])
+		}
+	}
+	if c := cnodeRows(t, s)[down]; c.Healthy {
+		t.Errorf("%s is still shown as healthy", down)
+	}
+	if mock.Mutating() != 0 {
+		t.Errorf("%d requests other than GET and the token call reached the VAST API", mock.Mutating())
 	}
 }

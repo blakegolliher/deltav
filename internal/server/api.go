@@ -48,10 +48,19 @@ type endpointJSON struct {
 }
 
 type targetJSON struct {
-	Name       string         `json:"name"`
-	ListenPort uint32         `json:"listen_port"`
-	TLS        bool           `json:"tls"`
-	Endpoints  []endpointJSON `json:"endpoints"`
+	Name       string `json:"name"`
+	ListenPort uint32 `json:"listen_port"`
+	TLS        bool   `json:"tls"`
+	// Source is "static" for a --static-target and "vast" for a target
+	// resolved from a VAST cluster's VIP pool.
+	Source  string `json:"source"`
+	Cluster string `json:"cluster,omitempty"`
+	Pool    string `json:"pool,omitempty"`
+	Tenant  string `json:"tenant,omitempty"`
+	Port    uint32 `json:"port,omitempty"` // the S3 port on the VIPs
+	// Status says how a VAST target resolved at the last poll.
+	Status    *targetStatus  `json:"status,omitempty"`
+	Endpoints []endpointJSON `json:"endpoints"` // what Envoys are served
 }
 
 type targetsResponse struct {
@@ -59,16 +68,41 @@ type targetsResponse struct {
 	Targets       []targetJSON `json:"targets"`
 }
 
-func (s *Server) handleTargets(w http.ResponseWriter, _ *http.Request) {
-	resp := targetsResponse{ConfigVersion: s.xds.Version(), Targets: []targetJSON{}}
+// targetList returns every target: the static ones and the VAST ones, the
+// latter also while they wait for their cluster's first poll and are not
+// served yet. It is sorted by name.
+func (s *Server) targetList() []targetJSON {
+	served := map[string][]endpointJSON{}
 	for _, t := range s.xds.Targets() {
-		out := targetJSON{Name: t.Name, ListenPort: t.ListenPort, TLS: t.TLS != nil, Endpoints: []endpointJSON{}}
+		eps := []endpointJSON{}
 		for _, e := range t.Endpoints {
-			out.Endpoints = append(out.Endpoints, endpointJSON{IP: e.IP, Port: e.Port, CNode: e.CNode})
+			eps = append(eps, endpointJSON{IP: e.IP, Port: e.Port, CNode: e.CNode})
 		}
-		resp.Targets = append(resp.Targets, out)
+		served[t.Name] = eps
 	}
-	writeJSON(w, http.StatusOK, resp)
+	out := []targetJSON{}
+	for _, t := range s.staticTargets() {
+		out = append(out, targetJSON{Name: t.Name, ListenPort: t.ListenPort, TLS: t.TLS != nil, Source: "static", Endpoints: served[t.Name]})
+	}
+	for _, t := range s.store.Targets() {
+		tj := targetJSON{
+			Name: t.Name, ListenPort: t.ListenPort, TLS: t.TLS != nil, Source: "vast",
+			Cluster: t.Cluster, Pool: t.Pool, Tenant: t.Tenant, Port: t.Port, Endpoints: served[t.Name],
+		}
+		if st, ok := s.poller.targetStatus(t.Name); ok {
+			tj.Status = &st
+		}
+		if tj.Endpoints == nil {
+			tj.Endpoints = []endpointJSON{}
+		}
+		out = append(out, tj)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func (s *Server) handleTargets(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, targetsResponse{ConfigVersion: s.xds.Version(), Targets: s.targetList()})
 }
 
 // fleetCounts summarizes the fleet. The config states count connected

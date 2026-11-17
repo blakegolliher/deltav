@@ -36,6 +36,8 @@ func newServeCmd() *cobra.Command {
 	f.StringVar(&cfg.GRPCAddr, "grpc-addr", "0.0.0.0:18000", "listen address for xDS (ADS) and Envoy telemetry streams")
 	f.StringVar(&cfg.HTTPAddr, "http-addr", "127.0.0.1:18080", "listen address for the HTTP API, web UI and /metrics")
 	f.StringVar(&cfg.APIToken, "api-token", "", "bearer token for the HTTP API; required when --http-addr is not loopback (prefer the env var)")
+	f.StringVar(&cfg.StateDir, "state-dir", "/var/lib/deltav", "directory for the state file (VAST clusters with their credentials, targets), kept at mode 0600")
+	f.DurationVar(&cfg.VASTPollInterval, "vast-poll-interval", server.DefaultVASTPollInterval, "how often each attached VAST cluster is read (three GETs)")
 	f.DurationVar(&cfg.LoadReportInterval, "load-report-interval", telemetry.DefaultLoadReportInterval, "how often each Envoy reports in-flight requests per endpoint")
 	f.BoolVar(&cfg.MetricsPerMember, "metrics-per-member", false, "add per-Envoy series to /metrics (many series on a large fleet)")
 	f.StringArrayVar(&static, "static-target", nil, "serve a fixed endpoint list with no VAST cluster, for testing: "+staticTargetSyntax+"; repeat the flag, or separate targets with ';'")
@@ -74,22 +76,6 @@ func group(use, short string, children ...*cobra.Command) *cobra.Command {
 
 func newTUICmd() *cobra.Command {
 	return leaf("tui", "Terminal UI for a running daemon", 6)
-}
-
-func newVastCmd() *cobra.Command {
-	return group("vast", "Attach the daemon to VAST clusters",
-		leaf("add NAME", "Add a VAST cluster (management endpoint and credentials)", 4),
-		leaf("list", "List attached VAST clusters", 4),
-		leaf("remove NAME", "Detach a VAST cluster", 4),
-	)
-}
-
-func newTargetCmd() *cobra.Command {
-	return group("target", "Define what Envoys balance across (cluster, VIP pool, port, TLS)",
-		leaf("add NAME", "Add a target", 6),
-		leaf("list", "List targets", 6),
-		leaf("remove NAME", "Remove a target", 6),
-	)
 }
 
 func newFleetCmd() *cobra.Command {

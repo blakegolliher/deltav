@@ -55,7 +55,13 @@ type LoadConfig struct {
 	Expect      bool          // PUTs send (and sign) "Expect: 100-continue"
 	// Check verifies each response against what was sent, using the fake
 	// backend's X-Fake-* headers. It only works against dvlab fakes3.
-	Check         bool
+	Check bool
+	// Roundtrip replaces the PUT/GET mix with whole cycles against a real
+	// S3 endpoint: PUT a new key, GET it back and compare the bytes, DELETE
+	// it. Requests then counts cycles (three HTTP requests each). It does
+	// not need a fake backend, and leaves nothing behind unless a cycle
+	// fails part-way.
+	Roundtrip     bool
 	Timeout       time.Duration // per request; default 60s
 	ExpectTimeout time.Duration // wait for 100 Continue before sending a body anyway; default 5s
 }
@@ -80,7 +86,8 @@ type LoadResult struct {
 	ElapsedSeconds  float64        `json:"elapsed_seconds"`
 	Latency         LatencyMS      `json:"latency_ms"`
 	CheckFailures   int            `json:"check_failures"`
-	Samples         []string       `json:"samples,omitempty"` // first few errors and check failures
+	Roundtrips      int            `json:"roundtrips,omitempty"` // PUT/GET/DELETE cycles that verified
+	Samples         []string       `json:"samples,omitempty"`    // first few errors and check failures
 
 	latencies []time.Duration
 }
@@ -100,6 +107,7 @@ func (r *LoadResult) merge(o *LoadResult) {
 	r.BytesSent += o.BytesSent
 	r.BytesReceived += o.BytesReceived
 	r.CheckFailures += o.CheckFailures
+	r.Roundtrips += o.Roundtrips
 	for k, v := range o.Status {
 		r.Status[k] += v
 	}
@@ -117,6 +125,7 @@ func newLoadResult() *LoadResult {
 }
 
 type loadRun struct {
+	id          string // distinguishes this run's keys from any other's
 	cfg         LoadConfig
 	base        *url.URL
 	host        string
@@ -156,7 +165,10 @@ func RunLoad(ctx context.Context, cfg LoadConfig) (*LoadResult, error) {
 		cfg.ExpectTimeout = 5 * time.Second
 	}
 
-	run := &loadRun{cfg: cfg, base: base, host: cfg.Host}
+	if cfg.Roundtrip && cfg.Check {
+		return nil, errors.New("--check needs a fake backend and --roundtrip a real one: choose one")
+	}
+	run := &loadRun{cfg: cfg, base: base, host: cfg.Host, id: strconv.FormatInt(time.Now().UnixNano(), 36)}
 	if run.host == "" {
 		run.host = base.Host
 	}
@@ -198,7 +210,11 @@ func RunLoad(ctx context.Context, cfg LoadConfig) (*LoadResult, error) {
 				if cfg.Requests <= 0 && !time.Now().Before(run.deadline) {
 					return
 				}
-				run.one(ctx, i, res)
+				if cfg.Roundtrip {
+					run.roundtrip(ctx, i, res)
+				} else {
+					run.one(ctx, i, res)
+				}
 			}
 		}(parts[w])
 	}
@@ -400,5 +416,112 @@ func (run *loadRun) one(ctx context.Context, i int64, res *LoadResult) {
 		}
 	} else if got := hex.EncodeToString(sum.Sum(nil)); n != cfg.Size || got != PatternSHA256(raw, cfg.Size) {
 		fail("GET returned %d bytes (want %d) or the wrong content", n, cfg.Size)
+	}
+}
+
+// send signs and sends one request, reads the whole response, and records
+// it. It returns the status, the body's length and SHA-256, and the start
+// of the body (an S3 error says why in XML); status 0 means the request
+// failed in transport (already recorded).
+func (run *loadRun) send(ctx context.Context, res *LoadResult, method, raw string, body []byte) (status int, n int64, sum, head string) {
+	ctx, cancel := context.WithTimeout(ctx, run.cfg.Timeout)
+	defer cancel()
+	var rd io.Reader
+	payload := EmptyPayloadHash
+	if body != nil {
+		rd, payload = bytes.NewReader(body), run.payloadHash
+	}
+	req, err := run.newRequest(ctx, method, raw, rd)
+	if err != nil {
+		res.TransportErrors++
+		res.sample("%v", err)
+		return 0, 0, "", ""
+	}
+	if body != nil {
+		req.ContentLength = int64(len(body))
+		if run.cfg.Expect && len(body) > 0 {
+			req.Header.Set("Expect", "100-continue")
+		}
+	}
+	if run.cfg.Creds != nil {
+		Sign(req, *run.cfg.Creds, payload, time.Now())
+	}
+	req.Header.Set("User-Agent", "dvlab-loadgen")
+	start := time.Now()
+	resp, err := run.client.Do(req)
+	if err != nil {
+		res.TransportErrors++
+		res.sample("%s %s: %v", method, raw, err)
+		return 0, 0, "", ""
+	}
+	h := sha256.New()
+	var first bytes.Buffer
+	n, err = io.Copy(h, io.TeeReader(resp.Body, &limitedBuffer{b: &first, left: 300}))
+	resp.Body.Close()
+	if err != nil {
+		res.TransportErrors++
+		res.sample("%s %s: reading the response: %v", method, raw, err)
+		return 0, 0, "", ""
+	}
+	res.latencies = append(res.latencies, time.Since(start))
+	res.Status[resp.StatusCode]++
+	res.BytesReceived += n
+	res.BytesSent += int64(len(body))
+	return resp.StatusCode, n, hex.EncodeToString(h.Sum(nil)), strings.Join(strings.Fields(first.String()), " ")
+}
+
+// limitedBuffer keeps the first bytes written to it and drops the rest.
+type limitedBuffer struct {
+	b    *bytes.Buffer
+	left int
+}
+
+func (l *limitedBuffer) Write(p []byte) (int, error) {
+	if take := min(len(p), l.left); take > 0 {
+		l.b.Write(p[:take])
+		l.left -= take
+	}
+	return len(p), nil
+}
+
+// roundtrip is one PUT, GET, DELETE cycle on a key only this run uses.
+func (run *loadRun) roundtrip(ctx context.Context, i int64, res *LoadResult) {
+	res.Requests++
+	raw := fmt.Sprintf("/%s/%srt-%s-%06d", run.cfg.Bucket, run.cfg.Prefix, run.id, i)
+	fail := func(format string, args ...any) {
+		res.CheckFailures++
+		res.sample("%s: %s", raw, fmt.Sprintf(format, args...))
+	}
+	status, _, _, head := run.send(ctx, res, http.MethodPut, raw, run.payload)
+	if status == 0 {
+		return
+	}
+	if status != http.StatusOK {
+		fail("PUT answered %d: %s", status, head)
+		return
+	}
+	ok := true
+	status, n, sum, head := run.send(ctx, res, http.MethodGet, raw, nil)
+	switch {
+	case status == 0:
+		ok = false
+	case status != http.StatusOK:
+		ok = false
+		fail("GET answered %d: %s", status, head)
+	case n != run.cfg.Size || sum != run.payloadHash:
+		ok = false
+		fail("GET returned %d bytes with SHA-256 %s; %d bytes with %s were stored", n, sum, run.cfg.Size, run.payloadHash)
+	}
+	// Delete even after a bad GET: the object is this run's to clean up.
+	status, _, _, head = run.send(ctx, res, http.MethodDelete, raw, nil)
+	switch {
+	case status == 0:
+		ok = false
+	case status != http.StatusNoContent && status != http.StatusOK:
+		ok = false
+		fail("DELETE answered %d; the object may be left in the bucket: %s", status, head)
+	}
+	if ok {
+		res.Roundtrips++
 	}
 }

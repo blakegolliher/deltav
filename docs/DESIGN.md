@@ -113,8 +113,14 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     that restarted at 1 could leave Envoys on stale config after a daemon restart. An update whose
     rendered resources are identical to the current ones is not pushed at all.
 17. **503s can eject the only path to a backend.** Amendment 3's risk is concrete: five consecutive
-    503s from one VIP eject it. The harness's refusing backend therefore answers 403. Whether VAST's
-    `503 SlowDown` should count toward ejection is still open.
+    503s from one VIP eject it. The harness's refusing backend therefore answers 403. It has also
+    been seen: in one integration run a backend answering a random 15% of requests with 503 took
+    17 requests and then nothing for the rest of the test, where the same backend had taken about
+    600 in each of two earlier runs. Refusals return faster than successes, so they bunch up in
+    completion order, and a run of five comes sooner than the rate suggests. A VIP that sheds load
+    with `503 SlowDown` would be ejected the same way, pushing its load onto the others. Whether
+    503 should count toward ejection is still open, and now has a reason to be decided before
+    this meets a busy cluster.
 
 ### Milestone 3: telemetry
 
@@ -142,6 +148,30 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
 21. **Not done yet in this area.** The per-target access-log sampling knob (amendment 8) waits for
     target management in milestone 6. Ingest cost is measured for the aggregator alone (about
     125 ns per entry on the dev host); the rate through gRPC from a real fleet is not measured.
+
+### Milestone 4: VAST
+
+22. **The VAST API as found** (5.5.3; sanitized responses in `testdata/vast/v5.5.3`). `GET
+    /api/cnodes/`, `/api/vippools/` and `/api/vips/` each return one unpaginated array. A VIP names
+    its pool (`vippool`) and its current CNode (`cnode`) by name; that is the VIP-to-CNode map.
+    Pools belong to tenants, so a target names a pool and, only if two tenants share the name, a
+    tenant. A CNode is healthy if `enabled` and `state == "ACTIVE"`; the VIPs of any other CNode
+    are left out. What this takes on trust is listed in `docs/ASSUMPTIONS.md`.
+23. **An unreachable VAST changes nothing.** A failed poll keeps the last good answer, and the
+    API shows the error and the age of the data. A target that suddenly resolves to no endpoints
+    is not believed until three polls in a row agree: a pool does not normally lose every VIP at
+    once, and Envoy's health checks already cover endpoints that are really gone.
+24. **A restart changes nothing either.** The endpoints served are cached beside the state file,
+    and the first snapshot is built from that cache before any listener opens. Without it, an
+    Envoy reconnecting to a restarted daemon would be handed a config with its targets missing
+    and would drop its listeners until the first poll. A target with neither a cache nor a
+    successful poll is not served at all, not served empty.
+25. **Per-CNode numbers follow the VIP.** Telemetry is per VIP; the CNode view groups VIPs by
+    their current host and merges their histograms before taking percentiles. After a VIP moves,
+    its whole window counts toward the CNode that has it now.
+26. **Credentials.** A cluster is read once before it is stored, so wrong credentials or an
+    untrusted certificate fail at `vast add`. The password is written to the state file (mode
+    0600, replaced atomically) and is never returned by the API, logged, or put in an error.
 
 ## Known gaps (POC)
 

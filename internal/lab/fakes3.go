@@ -36,14 +36,19 @@ const (
 
 // FakeS3Config configures one fake backend.
 type FakeS3Config struct {
-	Name    string            // reported in X-Fake-Backend
-	Latency time.Duration     // added to every request
-	Jitter  time.Duration     // up to this much more, uniformly
-	Rate403 float64           // fraction of requests answered 403 AccessDenied
-	Rate503 float64           // fraction of requests answered 503 SlowDown
-	Keys    map[string]string // access key -> secret; empty: signatures are not checked
-	GetSize int64             // GET body size when the request does not say; default 1024
-	MaxSkew time.Duration     // allowed X-Amz-Date skew; default 15 minutes
+	Name    string        // reported in X-Fake-Backend
+	Latency time.Duration // added to every request
+	Jitter  time.Duration // up to this much more, uniformly
+	Rate403 float64       // fraction of requests answered 403 AccessDenied
+	Rate503 float64       // fraction of requests answered 503 SlowDown
+	// Every403 and Every503 answer every Nth request with that status, on
+	// top of the random rates. Unlike a rate they never fail several
+	// requests in a row, so they do not trip Envoy's outlier detection.
+	Every403 int
+	Every503 int
+	Keys     map[string]string // access key -> secret; empty: signatures are not checked
+	GetSize  int64             // GET body size when the request does not say; default 1024
+	MaxSkew  time.Duration     // allowed X-Amz-Date skew; default 15 minutes
 }
 
 // FakeStats counts what a backend has seen.
@@ -105,7 +110,7 @@ func (f *FakeS3) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 func (f *FakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	f.requests.Add(1)
+	seq := f.requests.Add(1)
 	rawPath, _, _ := strings.Cut(r.RequestURI, "?")
 
 	h := w.Header()
@@ -138,13 +143,15 @@ func (f *FakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Injected failures answer before the body is read, as a server that
 	// refuses a request does. With "Expect: 100-continue" the client then
 	// never sends the body, provided the proxy passed the Expect through.
-	switch u := rand.Float64(); {
-	case u < f.cfg.Rate503:
+	every := func(n int) bool { return n > 0 && seq%int64(n) == 0 }
+	u := rand.Float64()
+	switch {
+	case every(f.cfg.Every503) || u < f.cfg.Rate503:
 		f.injected503.Add(1)
 		h.Set(HeaderInjected, "503")
 		s3Error(w, http.StatusServiceUnavailable, "SlowDown", "Please reduce your request rate.", rawPath)
 		return
-	case u < f.cfg.Rate503+f.cfg.Rate403:
+	case every(f.cfg.Every403) || u < f.cfg.Rate503+f.cfg.Rate403:
 		f.injected403.Add(1)
 		h.Set(HeaderInjected, "403")
 		s3Error(w, http.StatusForbidden, "AccessDenied", "Access Denied", rawPath)

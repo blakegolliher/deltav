@@ -463,7 +463,7 @@ func (a *Aggregator) Endpoints(w Window, also ...EndpointKey) []EndpointStats {
 	return out
 }
 
-// TargetStats is a target's endpoints added together.
+// TargetStats is a group of endpoints added together.
 type TargetStats struct {
 	Summary  Summary
 	InFlight uint64
@@ -471,15 +471,27 @@ type TargetStats struct {
 
 // Targets returns one rollup per target name seen in telemetry.
 func (a *Aggregator) Targets(w Window) map[string]TargetStats {
+	return a.Rollup(w, func(k EndpointKey) (string, bool) { return k.Target, true })
+}
+
+// Rollup adds endpoints together in groups. group names the group an
+// endpoint belongs to, or reports false to leave it out. Histograms are
+// merged before percentiles are taken, so a group's p99 is a true p99 and
+// not an average of its members'.
+func (a *Aggregator) Rollup(w Window, group func(EndpointKey) (string, bool)) map[string]TargetStats {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
 	sums := map[string]*slot{}
 	for k, s := range a.endpoints {
-		t := sums[k.Target]
+		name, ok := group(k)
+		if !ok {
+			continue
+		}
+		t := sums[name]
 		if t == nil {
 			t = &slot{}
-			sums[k.Target] = t
+			sums[name] = t
 		}
 		s.window(now, w, t)
 	}
@@ -488,9 +500,11 @@ func (a *Aggregator) Targets(w Window) map[string]TargetStats {
 		out[name] = TargetStats{Summary: summarize(t, a.span(now, w))}
 	}
 	for k, v := range a.inflight {
-		ts := out[k.Target]
-		ts.InFlight += v
-		out[k.Target] = ts
+		if name, ok := group(k); ok {
+			ts := out[name]
+			ts.InFlight += v
+			out[name] = ts
+		}
 	}
 	return out
 }

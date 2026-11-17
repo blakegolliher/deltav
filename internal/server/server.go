@@ -24,6 +24,7 @@ import (
 
 	"deltav/internal/fleet"
 	"deltav/internal/metrics"
+	"deltav/internal/state"
 	"deltav/internal/telemetry"
 	"deltav/internal/version"
 	"deltav/internal/xds"
@@ -57,6 +58,13 @@ type Config struct {
 	// MetricsPerMember adds per-Envoy series to /metrics. Off by default:
 	// thousands of hosts make too many series.
 	MetricsPerMember bool
+
+	// StateDir holds the state file (VAST clusters with their credentials,
+	// targets) and the endpoint cache. Empty keeps state in memory only.
+	StateDir string
+	// VASTPollInterval is how often each VAST cluster is read; zero means
+	// DefaultVASTPollInterval.
+	VASTPollInterval time.Duration
 }
 
 // Server is a configured, not yet listening, daemon.
@@ -71,6 +79,11 @@ type Server struct {
 	fleet     *fleet.Registry
 	agg       *metrics.Aggregator
 	telemetry *telemetry.Server
+	store     *state.Store
+	poller    *poller
+
+	staticMu sync.RWMutex
+	static   []xds.TargetSpec // the static targets; see SetStaticTargets
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -121,21 +134,28 @@ func New(cfg Config) (*Server, error) {
 	s.telemetry.Register(s.grpc)
 	s.registry.MustRegister(collector{s: s, perMember: cfg.MetricsPerMember})
 
-	if len(cfg.StaticTargets) > 0 {
-		// Every target streams access logs to the daemon. (The per-target
-		// sampling knob of DESIGN.md amendment 8 arrives with target
-		// management.)
-		static := append([]xds.TargetSpec(nil), cfg.StaticTargets...)
-		for i := range static {
-			static[i].AccessLog = true
-		}
-		v, _, err := s.xds.Update(ctx, static)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("static targets: %w", err)
-		}
-		log.Info("serving static targets", "count", len(cfg.StaticTargets), "config_version", v)
+	// Static targets are checked on their own first, so a mistake in them
+	// is reported as such.
+	s.static = append([]xds.TargetSpec(nil), cfg.StaticTargets...)
+	if _, _, err := s.xds.Update(ctx, s.staticSpecs()); err != nil {
+		cancel()
+		return nil, fmt.Errorf("static targets: %w", err)
 	}
+	store, err := state.Open(cfg.StateDir)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	s.store = store
+	s.poller = newPoller(s, cfg.VASTPollInterval)
+	// Before any Envoy can connect: serve the VAST targets with the
+	// endpoints they had at the last shutdown. An Envoy that reconnects to
+	// a restarted daemon must not be handed a config without its targets.
+	if _, _, err := s.poller.apply(ctx); err != nil {
+		cancel()
+		return nil, err
+	}
+	log.Info("serving targets", "static", len(cfg.StaticTargets), "vast", len(store.Targets()), "config_version", s.xds.Version())
 
 	var handler http.Handler = s.routes()
 	if cfg.APIToken != "" {
@@ -161,6 +181,13 @@ func (s *Server) routes() *http.ServeMux {
 	})
 	mux.HandleFunc("GET /api/v1/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/v1/targets", s.handleTargets)
+	mux.HandleFunc("POST /api/v1/targets", s.handleTargetAdd)
+	mux.HandleFunc("DELETE /api/v1/targets/{name}", s.handleTargetRemove)
+	mux.HandleFunc("GET /api/v1/vast", s.handleClusters)
+	mux.HandleFunc("POST /api/v1/vast", s.handleClusterAdd)
+	mux.HandleFunc("DELETE /api/v1/vast/{name}", s.handleClusterRemove)
+	mux.HandleFunc("GET /api/v1/vast/{name}/pools", s.handleClusterPools)
+	mux.HandleFunc("GET /api/v1/cnodes", s.handleCNodes)
 	mux.HandleFunc("GET /api/v1/endpoints", s.handleEndpoints)
 	mux.HandleFunc("GET /api/v1/fleet", s.handleFleet)
 	mux.HandleFunc("GET /api/v1/fleet/{node}", s.handleFleetMember)
@@ -177,9 +204,45 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = enc.Encode(v)
 }
 
-// XDS exposes the xDS server so in-process callers (tests, and the VAST
-// poller from milestone 4) can push targets.
+// XDS exposes the xDS server for reading what is served. Do not call its
+// Update: the poller owns the snapshot and would overwrite the change at
+// its next poll. Use SetStaticTargets.
 func (s *Server) XDS() *xds.Server { return s.xds }
+
+// staticTargets returns the static targets as configured.
+func (s *Server) staticTargets() []xds.TargetSpec {
+	s.staticMu.RLock()
+	defer s.staticMu.RUnlock()
+	return append([]xds.TargetSpec(nil), s.static...)
+}
+
+// staticSpecs returns the static targets as they are served. Like every
+// target they stream access logs to the daemon. (The per-target sampling
+// knob of DESIGN.md amendment 8 arrives with target management.)
+func (s *Server) staticSpecs() []xds.TargetSpec {
+	static := s.staticTargets()
+	for i := range static {
+		static[i].AccessLog = true
+	}
+	return static
+}
+
+// SetStaticTargets replaces the static targets (those of --static-target)
+// and serves the result together with the VAST targets. It returns the
+// config version now served and whether it changed. If the new set cannot
+// be served, the old one stays.
+func (s *Server) SetStaticTargets(ctx context.Context, targets []xds.TargetSpec) (version string, changed bool, err error) {
+	s.staticMu.Lock()
+	old := s.static
+	s.static = append([]xds.TargetSpec(nil), targets...)
+	s.staticMu.Unlock()
+	if version, changed, err = s.poller.apply(ctx); err != nil {
+		s.staticMu.Lock()
+		s.static = old
+		s.staticMu.Unlock()
+	}
+	return version, changed, err
+}
 
 // Listen binds both listeners. Run calls it if needed; tests call it first
 // to learn the ephemeral addresses.
@@ -214,7 +277,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errc := make(chan error, 2)
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
+	go func() { defer wg.Done(); s.poller.run(s.ctx) }()
 	go func() {
 		defer wg.Done()
 		tick := time.NewTicker(time.Minute)

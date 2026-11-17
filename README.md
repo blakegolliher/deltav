@@ -5,11 +5,12 @@ the VIPs of one or more VAST clusters, with no proxy machines in the data path. 
 endpoints over xDS, collects telemetry from every Envoy over the streams Envoy opens, and shows
 what the fleet and the CNodes are doing.
 
-**Status: proof of concept, milestone 3 of 8.** The daemon serves a static endpoint list to Envoy
-over xDS and tracks every connected Envoy; it ingests Envoy's access logs and load reports and
-keeps rolling per-endpoint and per-Envoy stats, served by the `/api/v1` endpoints below and
-`/metrics`; `deltav bootstrap` prints the client bootstrap; a test harness (`dvlab`) provides fake
-S3 backends and a load generator. VAST discovery and the UIs come in later milestones.
+**Status: proof of concept, milestone 4 of 8.** The daemon reads healthy endpoints from VAST clusters (or takes a static list),
+serves them to Envoy over xDS and tracks every connected Envoy; it ingests Envoy's access logs and
+load reports and keeps rolling per-endpoint, per-CNode and per-Envoy stats, served by the
+`/api/v1` endpoints below and `/metrics`; `deltav bootstrap` prints the client bootstrap; a test
+harness (`dvlab`) provides fake S3 backends and a load generator. The UIs come in later
+milestones.
 See [docs/DESIGN.md](docs/DESIGN.md). A ten-minute quick start comes
 with milestone 8.
 
@@ -33,6 +34,24 @@ sudo make install # /usr/local/bin/deltav and dv
 
 `go build ./cmd/deltav` also works on its own.
 
+## Attach a VAST cluster
+
+```sh
+deltav serve --state-dir /var/lib/deltav &          # the state file holds the VAST password, mode 0600
+
+export DELTAV_PASSWORD='...'                         # or: --password-stdin < file
+deltav vast add lab --host vast.example.com --user admin
+deltav vast pools lab                                # pools, and how their VIPs spread over CNodes
+deltav target add s3 --cluster lab --pool main --port 80 --listen-port 9000
+deltav target list
+```
+
+Every Envoy then listens on `127.0.0.1:9000` and balances across the pool's VIPs that sit on
+healthy CNodes. The daemon reads the cluster every 10 s with three GETs; it can issue nothing
+but GETs and the token call. If VAST is unreachable, or the daemon restarts, Envoys keep being
+served the last known endpoints. TLS verification of the VAST API is on unless the cluster is
+added with `--insecure`.
+
 ## Try it without a VAST cluster
 
 On Linux every `127.x.y.z` address is loopback, so fake backends can share one port the way VIPs do.
@@ -42,7 +61,7 @@ make build envoy                      # also fetches and verifies the pinned Env
 export AWS_ACCESS_KEY_ID=dvlab AWS_SECRET_ACCESS_KEY=dvlab-secret   # any pair; the fake verifies it
 
 bin/dvlab fakes3 --listen 127.0.0.11:9100,127.0.0.12:9100,127.0.0.13:9100 &
-bin/deltav serve --static-target s3:9000:127.0.0.11:9100,127.0.0.12:9100,127.0.0.13:9100 &
+bin/deltav serve --state-dir ./state --static-target s3:9000:127.0.0.11:9100,127.0.0.12:9100,127.0.0.13:9100 &
 bin/deltav bootstrap --xds-address 127.0.0.1:18000 > bootstrap.json
 .cache/envoy/envoy-1.40.2-linux-x86_64 -c bootstrap.json --service-node "$(hostname)" &
 
@@ -51,7 +70,10 @@ bin/dvlab loadgen --endpoint http://127.0.0.1:9000 --bucket lab --requests 1000 
     --special-keys --expect --check   # through Envoy; fails if Host, path, Expect or body changed
 ```
 
-`make integration` runs the same arrangement as tests, with real Envoy processes.
+`make integration` runs the same arrangement as tests, with real Envoy processes, including one
+where a mock VAST (a real cluster's sanitized responses) supplies the endpoints. `make live
+ENV=<file>` does it on real equipment: a real VAST cluster, real Envoy, and round trips against a
+real bucket; see the Makefile.
 
 ## HTTP API and metrics
 
@@ -61,7 +83,9 @@ is required when it is bound elsewhere). Stats take `?window=1m|5m|1h`.
 | Path | What it returns |
 |---|---|
 | `/api/v1/overview` | Per target: endpoints served, requests in flight, request and byte rates, status counts with 403 and 503 broken out, p50/p90/p99. Fleet counts. |
-| `/api/v1/targets` | The targets and endpoints being served to Envoys. |
+| `/api/v1/targets` | The targets and endpoints being served to Envoys, and how each VAST target resolved. `POST` adds one, `DELETE /api/v1/targets/{name}` removes it. |
+| `/api/v1/vast` | Attached VAST clusters and the state of their polling. `POST` attaches one (the password is never returned), `DELETE /api/v1/vast/{name}` detaches it; `/api/v1/vast/{name}/pools` lists its VIP pools. |
+| `/api/v1/cnodes` | Per CNode: state from VAST, VIPs hosted, requests in flight and the same stats, with a row per VIP beneath. |
 | `/api/v1/endpoints` | The same stats per endpoint (VIP); `?target=` narrows it. |
 | `/api/v1/fleet` | Envoys with version, last seen, config state and stats. `?limit=&offset=`, `?sort=node_id\|request_rate\|last_seen\|connected_at\|envoy_version\|config_state\|address`, `?order=asc\|desc`, `?q=` (substring), `?state=acked\|nacked\|pending`, `?connected=true\|false`. |
 | `/api/v1/fleet/{node}` | One Envoy, every window. |

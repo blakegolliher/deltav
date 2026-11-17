@@ -208,7 +208,7 @@ func TestADSFlowAndFleetRegistry(t *testing.T) {
 
 	// Dropping an endpoint pushes all three types under one new version.
 	target.Endpoints = target.Endpoints[:1]
-	v2, changed, err := s.XDS().Update(context.Background(), []xds.TargetSpec{target})
+	v2, changed, err := s.SetStaticTargets(context.Background(), []xds.TargetSpec{target})
 	if err != nil || !changed || v2 == v1 {
 		t.Fatalf("update: %q -> %q changed=%v err=%v", v1, v2, changed, err)
 	}
@@ -258,7 +258,7 @@ func TestADSFlowAndFleetRegistry(t *testing.T) {
 
 	// The next change is pushed as usual, and an ACK clears the error.
 	target.Endpoints = append(target.Endpoints, xds.Endpoint{IP: "192.0.2.13", Port: 80})
-	v3, _, err := s.XDS().Update(context.Background(), []xds.TargetSpec{target})
+	v3, _, err := s.SetStaticTargets(context.Background(), []xds.TargetSpec{target})
 	if err != nil || v3 == v2 {
 		t.Fatalf("second update: %q -> %q err=%v", v2, v3, err)
 	}
@@ -370,7 +370,7 @@ func TestEndpointsFlowDespiteRejectedCluster(t *testing.T) {
 	update := func(targets ...xds.TargetSpec) string {
 		t.Helper()
 		settle(t, s, 3) // a rejected type keeps its watch too
-		v, changed, err := s.XDS().Update(context.Background(), targets)
+		v, changed, err := s.SetStaticTargets(context.Background(), targets)
 		if err != nil || !changed {
 			t.Fatalf("update: changed=%v err=%v", changed, err)
 		}

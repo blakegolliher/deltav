@@ -19,7 +19,7 @@ ENVOY_FILE := envoy-$(ENVOY_VERSION)-linux-$(ENVOY_ARCH)
 ENVOY_BIN  := .cache/envoy/$(ENVOY_FILE)
 ENVOY_URL  := https://github.com/envoyproxy/envoy/releases/download/v$(ENVOY_VERSION)/$(ENVOY_FILE)
 
-.PHONY: all build test test-short race vet licenses license-report envoy integration install uninstall clean
+.PHONY: all build test test-short race vet licenses license-report envoy integration live install uninstall clean
 
 all: build
 
@@ -61,6 +61,22 @@ envoy:
 # Real Envoy against the daemon and fake S3 backends, all on this host.
 integration: envoy
 	ENVOY_BIN=$(abspath $(ENVOY_BIN)) $(GO) test -tags integration -count=1 -v ./test/integration/...
+
+# The same on real equipment: a real VAST cluster (read with GETs only), real
+# Envoy, and PUT/GET/DELETE round trips against a real bucket through the
+# loopback listener. Every object written is deleted again.
+#
+#   make live ENV=~/.deltav-lab.env
+#
+# ENV is a private file, outside the repo, that sets VAST_HOST, VAST_USER,
+# VAST_PASSWORD, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
+# DELTAV_LAB_BUCKET; and optionally DELTAV_LAB_POOL (main), DELTAV_LAB_PORT
+# (80), DELTAV_LAB_CYCLES (200), DELTAV_LAB_SIZE (1048576 bytes), AWS_REGION
+# (us-east-1) and DELTAV_LAB_INSECURE=1 for a self-signed VAST certificate.
+live: envoy
+	@test -n "$(ENV)" -a -r "$(ENV)" || { echo "usage: make live ENV=<file>; see the Makefile" >&2; exit 1; }
+	@set -a && . "$(ENV)" && set +a && \
+		ENVOY_BIN=$(abspath $(ENVOY_BIN)) $(GO) test -tags 'integration live' -count=1 -v -run TestLiveVASTThroughEnvoy ./test/integration/...
 
 install: build
 	install -d $(DESTDIR)$(PREFIX)/bin
