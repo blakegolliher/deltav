@@ -42,5 +42,5 @@ These are out of scope for the POC:
 
 ## Licensing
 
-Third-party licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) and audited
+Delta-V is MIT-licensed; see [LICENSE](LICENSE). Third-party licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) and audited
 in [docs/LICENSE_AUDIT.md](docs/LICENSE_AUDIT.md).

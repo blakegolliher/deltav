@@ -42,7 +42,7 @@ and `third_party/licenses/` from what is actually linked.
 
 | Component | Version | License | Use | Obligations |
 |---|---|---|---|---|
-| htmx and its `hx-sse` extension | 4.0.1 | 0BSD | Vendored into the embedded UI (milestone 5) | None. 0BSD is the zero-clause BSD, more permissive than BSD-2; I counted it as "BSD". Say if you read the policy differently. |
+| htmx and its `hx-sse` extension | 4.0.1 | 0BSD | Vendored into the embedded UI (milestone 5) | None. 0BSD is the zero-clause BSD, more permissive than BSD-2; approved as "BSD" on 2026-11-17. |
 | Tailwind CSS standalone CLI | 4.3.5 | MIT, © Tailwind Labs, Inc. | Build tool run by the Makefile; not shipped | The generated CSS embeds Tailwind's preflight. Keep the `/*! tailwindcss … MIT License */` banner in the committed CSS. |
 | Envoy | 1.40.2 | Apache-2.0 | Unmodified upstream binary on client hosts and in the test harness; not linked | If we ever *ship* Envoy binaries, include its LICENSE and NOTICE. |
 
@@ -56,4 +56,4 @@ and `third_party/licenses/` from what is actually linked.
   files are copied with their LICENSEs, as Apache-2.0 §4(d) requires for redistribution.
 - No code has been copied or adapted from any upstream project, including MinIO sidekick and
   service mesh control planes.
-- Delta-V itself has no license file yet. That is the vendor's call to make, not mine.
+- Delta-V itself is MIT-licensed (`LICENSE`), decided 2026-11-17.

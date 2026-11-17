@@ -2,7 +2,7 @@
 
 Milestone 1. This confirms the build prompt's design except for the amendments below. Each
 amendment was checked against the Envoy v1.40 API protos (go-control-plane `envoy` v1.40.0)
-or the Envoy v1.40.2 source. Items marked **[confirm]** need your OK before I build them.
+or the Envoy v1.40.2 source. Decisions recorded 2026-11-17 are marked **[decided]**.
 
 **Pins.** Envoy 1.40.2 · go-control-plane v0.14.0 + `envoy` API v1.40.0 · Go ≥ 1.26 (the API
 module requires it; `go.mod` selects toolchain go1.27.4, which `go build` fetches on its own) ·
@@ -63,10 +63,10 @@ cobra 1.10 · Prometheus client 1.25 · Bubble Tea / Lip Gloss v2.1.1, Bubbles v
    when a request completes, so a 10 GB GET appears all at once and the 1 m throughput window spikes
    for large objects. If that matters, Envoy's `access_log_flush_interval` can emit periodic entries
    (deltas keyed by stream ID); off for now.
-9. **Web UI auth off loopback [confirm].** A browser's `EventSource` cannot send an
+9. **Web UI auth off loopback [decided: approved].** A browser's `EventSource` cannot send an
    `Authorization` header. Proposal: a one-field form trades the *same* bearer token for an
-   `HttpOnly`, `SameSite=Strict` cookie, and mutating requests also check `Origin`. This adds no new
-   credential, but it touches your "ask before adding auth" rule.
+   `HttpOnly`, `SameSite=Strict` cookie, and mutating requests also check `Origin`. No new
+   credential type.
 10. **S3 path, header and timeout settings, stated explicitly.** Route `timeout: 0s`. Stream idle
     timeout 1 h. `normalize_path: false`, `merge_slashes: false` and
     `path_with_escaped_slashes_action: KEEP_UNCHANGED`, all set explicitly because the defaults
