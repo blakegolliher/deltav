@@ -101,8 +101,8 @@ func TestServeSmoke(t *testing.T) {
 		t.Fatalf("unknown path: %d", code)
 	}
 
-	// An Envoy-style ADS stream opens and accepts a request. The cache is
-	// empty in milestone 1, so no response is expected yet.
+	// An Envoy-style ADS stream opens and accepts a request. The exchange
+	// itself is covered in ads_test.go.
 	conn, err := grpc.NewClient(s.GRPCAddr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)

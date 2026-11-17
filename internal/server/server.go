@@ -22,9 +22,13 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
+	"deltav/internal/fleet"
 	"deltav/internal/version"
 	"deltav/internal/xds"
 )
+
+// fleetRetention is how long a disconnected Envoy stays in the fleet list.
+const fleetRetention = time.Hour
 
 // Config is the daemon's listen configuration.
 type Config struct {
@@ -32,6 +36,10 @@ type Config struct {
 	HTTPAddr string
 	APIToken string
 	Logger   *slog.Logger
+
+	// StaticTargets are served as given, with no VAST cluster behind them
+	// (serve --static-target). They are for testing.
+	StaticTargets []xds.TargetSpec
 }
 
 // Server is a configured, not yet listening, daemon.
@@ -40,9 +48,10 @@ type Server struct {
 	log      *slog.Logger
 	registry *prometheus.Registry
 
-	grpc *grpc.Server
-	http *http.Server
-	xds  *xds.Server
+	grpc  *grpc.Server
+	http  *http.Server
+	xds   *xds.Server
+	fleet *fleet.Registry
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -79,8 +88,22 @@ func New(cfg Config) (*Server, error) {
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 5 * time.Second}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 15 * time.Second, PermitWithoutStream: true}),
 	)
-	s.xds = xds.New(ctx, log)
+	s.fleet = fleet.New()
+	x, err := xds.New(ctx, log, s.fleet.Callbacks())
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	s.xds = x
 	s.xds.Register(s.grpc)
+	if len(cfg.StaticTargets) > 0 {
+		v, _, err := s.xds.Update(ctx, cfg.StaticTargets)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("static targets: %w", err)
+		}
+		log.Info("serving static targets", "count", len(cfg.StaticTargets), "config_version", v)
+	}
 
 	var handler http.Handler = s.routes()
 	if cfg.APIToken != "" {
@@ -104,6 +127,8 @@ func (s *Server) routes() *http.ServeMux {
 			"go_version":   runtime.Version(),
 		})
 	})
+	mux.HandleFunc("GET /api/v1/fleet", s.handleFleet)
+	mux.HandleFunc("GET /api/v1/targets", s.handleTargets)
 	mux.Handle("GET /metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{Registry: s.registry}))
 	return mux
 }
@@ -115,6 +140,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
 }
+
+// XDS exposes the xDS server so in-process callers (tests, and the VAST
+// poller from milestone 4) can push targets.
+func (s *Server) XDS() *xds.Server { return s.xds }
 
 // Listen binds both listeners. Run calls it if needed; tests call it first
 // to learn the ephemeral addresses.
@@ -149,7 +178,20 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errc := make(chan error, 2)
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		tick := time.NewTicker(time.Minute)
+		defer tick.Stop()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-tick.C:
+				s.fleet.Prune(fleetRetention)
+			}
+		}
+	}()
 	go func() { defer wg.Done(); errc <- s.grpc.Serve(s.grpcLn) }()
 	go func() {
 		defer wg.Done()

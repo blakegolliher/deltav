@@ -49,10 +49,12 @@ cobra 1.10 · Prometheus client 1.25 · Bubble Tea / Lip Gloss v2.1.1, Bubbles v
 5. **Health checks are a fleet-scale load.** Every Envoy checks every VIP: 1,000 Envoys × 16 VIPs
    at 5 s is 3,200 TCP connects/s to the cluster. Default to 15 s with jitter and keep the 60 s
    `no_traffic_interval`. VAST's own CNode state is the primary signal; health checks are backup.
-6. **Upstream TLS needs an explicit SNI and CA.** Envoy verifies upstream certificates only when
-   it has a validation context, and `auto_sni` would send the client's Host (`127.0.0.1`). Each TLS
-   target gets a server name and a CA bundle, with verification on by default and a per-target
-   opt-out (as for the VAST API).
+6. **Upstream TLS needs an explicit SNI and trust source.** Envoy verifies upstream certificates
+   only when it has a validation context, and `auto_sni` would send the client's Host
+   (`127.0.0.1`). Each TLS target gets a server name, with verification on by default and a
+   per-target opt-out (as for the VAST API). Trust comes from a CA file if the target names one,
+   otherwise from the client host's own trust store (`system_root_certs`): no single bundle path
+   exists on both Debian and RHEL families. *Not yet exercised against a real Envoy.*
 7. **LRS "connections" are in-flight requests.** In the Envoy source, `total_requests_in_progress`
    is the per-host `rq_active` gauge. Idle keep-alive sockets are invisible to it, so it is labeled
    that way. The upstream idle timeout drops from 1 h to 5 min to bound the sockets it can't count.
@@ -78,10 +80,41 @@ cobra 1.10 · Prometheus client 1.25 · Bubble Tea / Lip Gloss v2.1.1, Bubbles v
 12. **CDS pushes re-warm clusters.** Each snapshot bumps every resource version, so a warming
     cluster gets EDS immediately. Envoy's EDS cache, used only after the 15 s
     `initial_fetch_timeout`, is the fallback. The old cluster serves while the new one warms; this is
-    verified in milestone 7.
+    verified in milestone 7. Amendment 15 says how the push order this relies on is kept.
 13. **Prometheus semantics.** `/metrics` exports cumulative counters and histograms (rolling windows
     stay in the JSON API). Series per target, VIP and CNode are on; series per fleet member are off by
     default, since thousands of hosts would be too many.
+
+### Found while building milestone 2
+
+Amendments 14 to 16 come from reading go-control-plane v0.14.0 and from protocol tests that play
+Envoy's side of the ADS stream (`internal/server/ads_test.go`); 17 follows from amendment 3's
+settings. The integration tests (`make integration`, real Envoy 1.40.2) confirm 14 and 15: a
+rejected cluster is reported once with Envoy's reason, is not re-sent, and endpoint updates keep
+flowing. They also show that Envoy adds exactly one request header, `x-forwarded-proto: http`. It
+is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked on the live cluster.
+
+14. **A rejected config must not be re-sent.** A NACK carries the version Envoy last accepted. The
+    snapshot cache has no notion of a NACK: it sees a version that differs from the snapshot's and
+    answers at once with the same resources, which Envoy rejects again, in a tight loop per Envoy.
+    A callback (`xds.withNACKGuard`) rewrites a NACK's version to the one it rejected, so the cache
+    waits for the next change. The fleet registry shows the NACK and Envoy's reason until then.
+15. **The cache's ADS mode is off; push order is kept another way.** In ADS mode the cache
+    withholds an EDS response, and drops the watch, whenever the snapshot holds endpoints the Envoy
+    has not asked for. An Envoy that rejects one target's cluster never asks for that cluster's
+    endpoints, so it would get no endpoint updates for any other target until it reconnected.
+    Instead `xds.Server` publishes each version one type at a time (clusters, endpoints,
+    listeners), and the server runs with `WithOrderedADS`; by default it reads each type from its
+    own channel in random order. The order is best effort: a stream with an ACK in flight is
+    answered when the ACK lands. So routes set `validate_clusters: false`; a listener that arrives
+    before its cluster answers 503 for that moment instead of being rejected for good.
+16. **Config versions are unique to a daemon run** (`<start time>.<counter>`). A reconnecting Envoy
+    reports the version it holds and is sent config only if the daemon's differs, so a counter
+    that restarted at 1 could leave Envoys on stale config after a daemon restart. An update whose
+    rendered resources are identical to the current ones is not pushed at all.
+17. **503s can eject the only path to a backend.** Amendment 3's risk is concrete: five consecutive
+    503s from one VIP eject it. The harness's refusing backend therefore answers 403. Whether VAST's
+    `503 SlowDown` should count toward ejection is still open.
 
 ## Known gaps (POC)
 

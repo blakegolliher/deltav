@@ -8,15 +8,22 @@ import (
 
 	"deltav/internal/server"
 	"deltav/internal/version"
+	"deltav/internal/xds"
 )
 
 func newServeCmd() *cobra.Command {
 	var cfg server.Config
+	var static []string
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the daemon: xDS, telemetry ingest, VAST pollers, HTTP API, web UI, /metrics",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			targets, err := parseStaticTargets(static)
+			if err != nil {
+				return err
+			}
+			cfg.StaticTargets = targets
 			s, err := server.New(cfg)
 			if err != nil {
 				return err
@@ -28,6 +35,7 @@ func newServeCmd() *cobra.Command {
 	f.StringVar(&cfg.GRPCAddr, "grpc-addr", "0.0.0.0:18000", "listen address for xDS (ADS) and Envoy telemetry streams")
 	f.StringVar(&cfg.HTTPAddr, "http-addr", "127.0.0.1:18080", "listen address for the HTTP API, web UI and /metrics")
 	f.StringVar(&cfg.APIToken, "api-token", "", "bearer token for the HTTP API; required when --http-addr is not loopback (prefer the env var)")
+	f.StringArrayVar(&static, "static-target", nil, "serve a fixed endpoint list with no VAST cluster, for testing: "+staticTargetSyntax+"; repeat the flag, or separate targets with ';'")
 	return annotateEnv(cmd)
 }
 
@@ -102,5 +110,30 @@ func newLimitCmd() *cobra.Command {
 }
 
 func newBootstrapCmd() *cobra.Command {
-	return leaf("bootstrap", "Print an Envoy bootstrap file and systemd unit for a client host", 8)
+	var o xds.BootstrapOptions
+	cmd := &cobra.Command{
+		Use:   "bootstrap",
+		Short: "Print the Envoy bootstrap file for client hosts",
+		Long: "Print the Envoy bootstrap file (JSON) for client hosts. One file serves the whole\n" +
+			"fleet: the node ID is not in it, so start Envoy with --service-node, for example\n\n" +
+			"  envoy -c bootstrap.json --service-node \"$(hostname)\"\n\n" +
+			"The systemd unit that does this arrives in milestone 8.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if o.XDSAddress == "" {
+				return fmt.Errorf("--xds-address is required: the daemon's gRPC address as client hosts reach it, e.g. deltav.example.com:18000")
+			}
+			b, err := xds.BootstrapJSON(o)
+			if err != nil {
+				return err
+			}
+			_, err = out(cmd).Write(b)
+			return err
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&o.XDSAddress, "xds-address", "", "host:port of the daemon's gRPC listener, as client hosts reach it")
+	f.StringVar(&o.NodeCluster, "node-cluster", xds.DefaultNodeCluster, "xDS node cluster name the Envoys report")
+	f.StringVar(&o.AdminAddress, "admin-address", "127.0.0.1:9901", "ip:port for Envoy's local admin interface; empty turns it off")
+	return annotateEnv(cmd)
 }
