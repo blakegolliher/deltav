@@ -56,11 +56,18 @@ func envoyBin(t *testing.T) string {
 	return abs
 }
 
-// backends starts n fake S3 servers. On Linux they take distinct loopback
-// addresses on one shared port, as VIPs do; where only 127.0.0.1 is usable
-// they fall back to distinct ports.
+// backends starts n identical fake S3 servers.
 func backends(t *testing.T, n int) ([]xds.Endpoint, []*lab.FakeS3) {
 	t.Helper()
+	return backendsWith(t, make([]lab.FakeS3Config, n)...)
+}
+
+// backendsWith starts one fake S3 server per config. On Linux they take
+// distinct loopback addresses on one shared port, as VIPs do; where only
+// 127.0.0.1 is usable they fall back to distinct ports.
+func backendsWith(t *testing.T, cfgs ...lab.FakeS3Config) ([]xds.Endpoint, []*lab.FakeS3) {
+	t.Helper()
+	n := len(cfgs)
 	var lns []net.Listener
 	first, err := net.Listen("tcp", "127.0.0.11:0")
 	if err == nil {
@@ -87,9 +94,11 @@ func backends(t *testing.T, n int) ([]xds.Endpoint, []*lab.FakeS3) {
 	t.Cleanup(cancel)
 	var eps []xds.Endpoint
 	var fakes []*lab.FakeS3
-	for _, ln := range lns {
+	for i, ln := range lns {
 		addr := ln.Addr().(*net.TCPAddr)
-		f := lab.NewFakeS3(lab.FakeS3Config{Name: addr.String(), Keys: map[string]string{creds.AccessKey: creds.SecretKey}})
+		cfg := cfgs[i]
+		cfg.Name, cfg.Keys = addr.String(), map[string]string{creds.AccessKey: creds.SecretKey}
+		f := lab.NewFakeS3(cfg)
 		go func() { _ = f.Serve(ctx, ln) }()
 		eps = append(eps, xds.Endpoint{IP: addr.IP.String(), Port: uint32(addr.Port)})
 		fakes = append(fakes, f)
@@ -112,7 +121,8 @@ func daemon(t *testing.T, targets ...xds.TargetSpec) *server.Server {
 	t.Helper()
 	s, err := server.New(server.Config{
 		GRPCAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", StaticTargets: targets,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		LoadReportInterval: time.Second, // the default 5s would make these tests slow
+		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +185,14 @@ func envoy(t *testing.T, s *server.Server, nodeID string) {
 		}
 		if t.Failed() {
 			if b, err := os.ReadFile(logPath); err == nil {
-				lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+				// Leave out the startup listing of every compiled-in
+				// extension and header: it would bury what matters.
+				var lines []string
+				for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+					if !strings.Contains(line, "server.cc:467]") && !strings.Contains(line, "server.cc:547]") {
+						lines = append(lines, line)
+					}
+				}
 				if len(lines) > 60 {
 					lines = lines[len(lines)-60:]
 				}
@@ -437,4 +454,238 @@ func TestTwoEnvoysShareListenerPort(t *testing.T) {
 	}
 	waitListener(t, port)
 	requireClean(t, load(t, port, func(c *lab.LoadConfig) { c.Concurrency = 16 }))
+}
+
+// The shapes of the API responses this test reads; see internal/server/api.go.
+type summary struct {
+	Requests uint64 `json:"requests"`
+	Status   struct {
+		S2xx uint64 `json:"2xx"`
+		S403 uint64 `json:"403"`
+		S503 uint64 `json:"503"`
+	} `json:"status"`
+	BytesIn   uint64 `json:"bytes_in"`
+	BytesOut  uint64 `json:"bytes_out"`
+	LatencyMS struct {
+		P50 float64 `json:"p50"`
+		P99 float64 `json:"p99"`
+	} `json:"latency_ms"`
+}
+
+type endpointRow struct {
+	Endpoint   string  `json:"endpoint"`
+	Configured bool    `json:"configured"`
+	InFlight   uint64  `json:"in_flight"`
+	Stats      summary `json:"stats"`
+	Load       struct {
+		Issued  uint64 `json:"issued"`
+		Success uint64 `json:"success"`
+		Errors  uint64 `json:"errors"`
+	} `json:"load"`
+}
+
+func getAPI[T any](t *testing.T, s *server.Server, path string) T {
+	t.Helper()
+	resp, err := http.Get("http://" + s.HTTPAddr() + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out T
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET %s: status %d", path, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	return out
+}
+
+func endpointRows(t *testing.T, s *server.Server) map[string]endpointRow {
+	t.Helper()
+	resp := getAPI[struct {
+		Endpoints []endpointRow `json:"endpoints"`
+	}](t, s, "/api/v1/endpoints?window=5m")
+	out := map[string]endpointRow{}
+	for _, e := range resp.Endpoints {
+		out[e.Endpoint] = e
+	}
+	return out
+}
+
+func targetInFlight(t *testing.T, s *server.Server) uint64 {
+	t.Helper()
+	ov := getAPI[struct {
+		Targets []struct {
+			InFlight uint64 `json:"in_flight"`
+		} `json:"targets"`
+	}](t, s, "/api/v1/overview")
+	if len(ov.Targets) != 1 {
+		t.Fatalf("overview has %d targets", len(ov.Targets))
+	}
+	return ov.Targets[0].InFlight
+}
+
+// Milestone 3: what Envoy streams back (access logs and load reports)
+// matches what the backends saw, per endpoint and per Envoy, in the API and
+// in /metrics.
+func TestTelemetryThroughEnvoy(t *testing.T) {
+	const slow = 300 * time.Millisecond
+	eps, fakes := backendsWith(t,
+		lab.FakeS3Config{},                             // 0: healthy and fast
+		lab.FakeS3Config{Latency: slow},                // 1: healthy and slow
+		lab.FakeS3Config{Rate403: 0.30, Rate503: 0.15}, // 2: refuses nearly half
+	)
+	names := make([]string, len(eps))
+	for i, e := range eps {
+		names[i] = net.JoinHostPort(e.IP, strconv.Itoa(int(e.Port)))
+	}
+	port := freePort(t)
+	s := daemon(t, xds.TargetSpec{Name: "s3", ListenPort: port, Endpoints: eps})
+	envoy(t, s, "it-envoy-1")
+	waitMember(t, s, "it-envoy-1", "connected and in sync", inSync)
+	waitListener(t, port)
+
+	// Envoy starts counting a cluster for load reports at the first report
+	// tick after the cluster exists, resetting its counters as it does, so
+	// whatever a new cluster carries before that tick is never reported
+	// (see DESIGN.md, amendment 20). Let that tick pass before the load.
+	time.Sleep(2500 * time.Millisecond)
+
+	// Six seconds of load, so several one-second load reports land while
+	// requests to the slow backend are in flight.
+	done := make(chan *lab.LoadResult, 1)
+	go func() {
+		done <- load(t, port, func(c *lab.LoadConfig) {
+			c.Requests, c.Duration, c.Concurrency, c.Size = 0, 6*time.Second, 8, 16*1024
+		})
+	}()
+	var res *lab.LoadResult
+	var peak uint64
+	for res == nil {
+		select {
+		case res = <-done:
+		case <-time.After(200 * time.Millisecond):
+			if n := targetInFlight(t, s); n > peak {
+				peak = n
+			}
+		}
+	}
+	if res.CheckFailures != 0 || res.TransportErrors != 0 {
+		t.Fatalf("load: %d check failures, %d transport errors:\n%s", res.CheckFailures, res.TransportErrors, strings.Join(res.Samples, "\n"))
+	}
+	t.Logf("load: %d requests, status %v, backends %v; peak in-flight seen in the API: %d", res.Requests, res.Status, res.Backends, peak)
+	if peak == 0 {
+		t.Error("the API never showed a request in flight during six seconds of load to a slow backend")
+	}
+
+	// Access logs are flushed every second: wait for the counts to settle
+	// on what the backends themselves counted.
+	var rows map[string]endpointRow
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		rows = endpointRows(t, s)
+		settled := true
+		for i, f := range fakes {
+			if rows[names[i]].Stats.Requests != uint64(f.Stats().Requests) {
+				settled = false
+			}
+		}
+		if settled || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	var total uint64
+	for i, f := range fakes {
+		st, row := f.Stats(), rows[names[i]]
+		total += uint64(st.Requests)
+		t.Logf("backend %d (%s): backend saw %+v; API reports %+v", i, names[i], st, row)
+		if !row.Configured {
+			t.Errorf("backend %d is not marked configured", i)
+		}
+		if row.Stats.Requests != uint64(st.Requests) {
+			t.Errorf("backend %d: API counts %d requests, the backend %d", i, row.Stats.Requests, st.Requests)
+		}
+		if row.Stats.Status.S403 != uint64(st.Injected403) || row.Stats.Status.S503 != uint64(st.Injected503) {
+			t.Errorf("backend %d: API counts %d 403s and %d 503s, the backend injected %d and %d",
+				i, row.Stats.Status.S403, row.Stats.Status.S503, st.Injected403, st.Injected503)
+		}
+		if row.Stats.BytesIn != uint64(st.BytesIn) {
+			t.Errorf("backend %d: API counts %d bytes in, the backend read %d", i, row.Stats.BytesIn, st.BytesIn)
+		}
+	}
+	if got := rows[names[0]].Stats.BytesOut; got != uint64(fakes[0].Stats().BytesOut) {
+		t.Errorf("backend 0: API counts %d bytes out, the backend wrote %d", got, fakes[0].Stats().BytesOut)
+	}
+	if fakes[2].Stats().Injected403 == 0 || fakes[2].Stats().Injected503 == 0 {
+		t.Errorf("backend 2 injected no failures; the test proved nothing about 403 and 503: %+v", fakes[2].Stats())
+	}
+	if p50 := rows[names[1]].Stats.LatencyMS.P50; p50 < float64(slow.Milliseconds())*0.85 || p50 > float64(slow.Milliseconds())*2 {
+		t.Errorf("slow backend p50 = %.0f ms, its injected latency is %d ms", p50, slow.Milliseconds())
+	}
+	if p50 := rows[names[0]].Stats.LatencyMS.P50; p50 <= 0 || p50 > 100 {
+		t.Errorf("fast backend p50 = %.1f ms", p50)
+	}
+
+	// The Envoy's own row adds up to the same total.
+	member := getAPI[struct {
+		Windows map[string]summary `json:"windows"`
+	}](t, s, "/api/v1/fleet/it-envoy-1")
+	if got := member.Windows["5m"].Requests; got != total {
+		t.Errorf("fleet member counts %d requests, the backends %d", got, total)
+	}
+
+	// Load reports: nothing is in flight once the load has stopped, and the
+	// request counts, which do not depend on access logs, agree too. At
+	// this layer a 5xx is an error and anything else, a 403 included, is a
+	// success.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		rows = endpointRows(t, s)
+		settled := targetInFlight(t, s) == 0
+		for i, f := range fakes {
+			if rows[names[i]].Load.Issued != uint64(f.Stats().Requests) {
+				settled = false
+			}
+		}
+		if settled || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if n := targetInFlight(t, s); n != 0 {
+		t.Errorf("%d requests still reported in flight after the load stopped", n)
+	}
+	for i, f := range fakes {
+		row := rows[names[i]]
+		t.Logf("backend %d load report totals: %+v", i, row.Load)
+		st := f.Stats()
+		if row.Load.Issued != uint64(st.Requests) {
+			t.Errorf("backend %d: load reports count %d issued requests, the backend saw %d", i, row.Load.Issued, st.Requests)
+		}
+		if row.Load.Errors != uint64(st.Injected503) || row.Load.Success != uint64(st.Requests-st.Injected503) {
+			t.Errorf("backend %d: load reports count %d successes and %d errors; the backend answered %d requests, %d of them 503",
+				i, row.Load.Success, row.Load.Errors, st.Requests, st.Injected503)
+		}
+	}
+
+	// One scrape covers it all.
+	resp, err := http.Get("http://" + s.HTTPAddr() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{
+		fmt.Sprintf(`deltav_endpoint_requests_total{class="2xx",cnode="",endpoint=%q,target="s3"} %d`, names[0], fakes[0].Stats().Requests),
+		fmt.Sprintf(`deltav_endpoint_responses_total{cnode="",code="503",endpoint=%q,target="s3"} %d`, names[2], fakes[2].Stats().Injected503),
+		fmt.Sprintf(`deltav_endpoint_request_duration_seconds_count{cnode="",endpoint=%q,target="s3"} %d`, names[1], fakes[1].Stats().Requests),
+		fmt.Sprintf(`deltav_endpoint_in_flight_requests{cnode="",endpoint=%q,target="s3"} 0`, names[1]),
+		`deltav_fleet_members{state="connected"} 1`,
+	} {
+		if !strings.Contains(string(body), want+"\n") {
+			t.Errorf("/metrics lacks: %s", want)
+		}
+	}
 }

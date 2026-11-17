@@ -95,6 +95,15 @@ func Bootstrap(o BootstrapOptions) (*bootstrapv3.Bootstrap, error) {
 	b := &bootstrapv3.Bootstrap{
 		Node:            &corev3.Node{Cluster: nodeCluster},
 		StaticResources: &bootstrapv3.Bootstrap_StaticResources{Clusters: []*clusterv3.Cluster{control}},
+		// Load reporting: Envoy opens a stream to the daemon and reports
+		// per-endpoint request counts at the interval the daemon asks for.
+		ClusterManager: &bootstrapv3.ClusterManager{
+			LoadStatsConfig: &corev3.ApiConfigSource{
+				ApiType:             corev3.ApiConfigSource_GRPC,
+				TransportApiVersion: corev3.ApiVersion_V3,
+				GrpcServices:        []*corev3.GrpcService{controlGRPC()},
+			},
+		},
 		DynamicResources: &bootstrapv3.Bootstrap_DynamicResources{
 			AdsConfig: &corev3.ApiConfigSource{
 				ApiType:             corev3.ApiConfigSource_GRPC,

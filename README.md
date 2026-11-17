@@ -5,10 +5,12 @@ the VIPs of one or more VAST clusters, with no proxy machines in the data path. 
 endpoints over xDS, collects telemetry from every Envoy over the streams Envoy opens, and shows
 what the fleet and the CNodes are doing.
 
-**Status: proof of concept, milestone 2 of 8.** The daemon serves a static endpoint list to Envoy
-over xDS and tracks every connected Envoy; `deltav bootstrap` prints the client bootstrap; a test
-harness (`dvlab`) provides fake S3 backends and a load generator. VAST discovery, telemetry and the
-UIs come in later milestones. See [docs/DESIGN.md](docs/DESIGN.md). A ten-minute quick start comes
+**Status: proof of concept, milestone 3 of 8.** The daemon serves a static endpoint list to Envoy
+over xDS and tracks every connected Envoy; it ingests Envoy's access logs and load reports and
+keeps rolling per-endpoint and per-Envoy stats, served by the `/api/v1` endpoints below and
+`/metrics`; `deltav bootstrap` prints the client bootstrap; a test harness (`dvlab`) provides fake
+S3 backends and a load generator. VAST discovery and the UIs come in later milestones.
+See [docs/DESIGN.md](docs/DESIGN.md). A ten-minute quick start comes
 with milestone 8.
 
 The binary is `deltav`, also installed as `dv`; the two behave identically.
@@ -50,6 +52,33 @@ bin/dvlab loadgen --endpoint http://127.0.0.1:9000 --bucket lab --requests 1000 
 ```
 
 `make integration` runs the same arrangement as tests, with real Envoy processes.
+
+## HTTP API and metrics
+
+The API is JSON under `/api/v1` on the HTTP listener (`127.0.0.1:18080` by default; a bearer token
+is required when it is bound elsewhere). Stats take `?window=1m|5m|1h`.
+
+| Path | What it returns |
+|---|---|
+| `/api/v1/overview` | Per target: endpoints served, requests in flight, request and byte rates, status counts with 403 and 503 broken out, p50/p90/p99. Fleet counts. |
+| `/api/v1/targets` | The targets and endpoints being served to Envoys. |
+| `/api/v1/endpoints` | The same stats per endpoint (VIP); `?target=` narrows it. |
+| `/api/v1/fleet` | Envoys with version, last seen, config state and stats. `?limit=&offset=`, `?sort=node_id\|request_rate\|last_seen\|connected_at\|envoy_version\|config_state\|address`, `?order=asc\|desc`, `?q=` (substring), `?state=acked\|nacked\|pending`, `?connected=true\|false`. |
+| `/api/v1/fleet/{node}` | One Envoy, every window. |
+| `/api/v1/events` | Server-sent events: the overview, every `?interval=` (default 2s). |
+
+"In flight" is the number of requests Envoys have outstanding to an endpoint, from load reports.
+S3 over HTTP/1.1 holds one request per connection, so it is the count of busy connections; idle
+keep-alive connections are not included.
+
+`/metrics` exports the same data as cumulative Prometheus series, so one scrape covers the fleet:
+`deltav_endpoint_requests_total{target,endpoint,cnode,class}`,
+`deltav_endpoint_responses_total{...,code="403"|"503"}`, `deltav_endpoint_bytes_total{...,direction}`,
+`deltav_endpoint_request_duration_seconds` (histogram), `deltav_endpoint_in_flight_requests`,
+`deltav_endpoint_overflow_total`, `deltav_endpoint_load_issued_total`,
+`deltav_endpoint_load_completed_total{...,result}`, `deltav_fleet_members{state}`,
+`deltav_fleet_config{state}` and `deltav_target_endpoints{target}`. Per-Envoy series
+(`deltav_member_*`) are off unless the daemon runs with `--metrics-per-member`.
 
 ## S3 clients
 

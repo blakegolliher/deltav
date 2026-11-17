@@ -110,8 +110,8 @@ func waitMember(t *testing.T, s *Server, nodeID, what string, ok func(fleet.Memb
 	for time.Now().Before(deadline) {
 		for _, m := range fleetOf(t, s).Members {
 			if m.NodeID == nodeID {
-				if last = m; ok(m) {
-					return m
+				if last = m.Member; ok(last) {
+					return last
 				}
 			}
 		}

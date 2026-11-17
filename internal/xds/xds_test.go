@@ -124,6 +124,11 @@ func TestBootstrap(t *testing.T) {
 		!ads.GetSetNodeOnFirstMessageOnly() || ads.GetGrpcServices()[0].GetEnvoyGrpc().GetClusterName() != ControlCluster {
 		t.Errorf("ads_config = %v", ads)
 	}
+	lrs := b.GetClusterManager().GetLoadStatsConfig()
+	if lrs.GetApiType() != corev3.ApiConfigSource_GRPC || lrs.GetTransportApiVersion() != corev3.ApiVersion_V3 ||
+		lrs.GetGrpcServices()[0].GetEnvoyGrpc().GetClusterName() != ControlCluster {
+		t.Errorf("load_stats_config = %v", lrs)
+	}
 	if b.GetDynamicResources().GetCdsConfig().GetAds() == nil || b.GetDynamicResources().GetLdsConfig().GetAds() == nil {
 		t.Error("CDS and LDS must come over ADS")
 	}

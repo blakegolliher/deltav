@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"deltav/internal/server"
+	"deltav/internal/telemetry"
 	"deltav/internal/version"
 	"deltav/internal/xds"
 )
@@ -35,6 +36,8 @@ func newServeCmd() *cobra.Command {
 	f.StringVar(&cfg.GRPCAddr, "grpc-addr", "0.0.0.0:18000", "listen address for xDS (ADS) and Envoy telemetry streams")
 	f.StringVar(&cfg.HTTPAddr, "http-addr", "127.0.0.1:18080", "listen address for the HTTP API, web UI and /metrics")
 	f.StringVar(&cfg.APIToken, "api-token", "", "bearer token for the HTTP API; required when --http-addr is not loopback (prefer the env var)")
+	f.DurationVar(&cfg.LoadReportInterval, "load-report-interval", telemetry.DefaultLoadReportInterval, "how often each Envoy reports in-flight requests per endpoint")
+	f.BoolVar(&cfg.MetricsPerMember, "metrics-per-member", false, "add per-Envoy series to /metrics (many series on a large fleet)")
 	f.StringArrayVar(&static, "static-target", nil, "serve a fixed endpoint list with no VAST cluster, for testing: "+staticTargetSyntax+"; repeat the flag, or separate targets with ';'")
 	return annotateEnv(cmd)
 }

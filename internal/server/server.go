@@ -23,12 +23,22 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"deltav/internal/fleet"
+	"deltav/internal/metrics"
+	"deltav/internal/telemetry"
 	"deltav/internal/version"
 	"deltav/internal/xds"
 )
 
-// fleetRetention is how long a disconnected Envoy stays in the fleet list.
-const fleetRetention = time.Hour
+const (
+	// fleetRetention is how long a disconnected Envoy stays in the fleet list.
+	fleetRetention = time.Hour
+	// seriesRetention is how long an endpoint or Envoy with no requests
+	// keeps its series: a little past the longest window.
+	seriesRetention = time.Hour + 5*time.Minute
+	// staleLoadReport drops in-flight counts from an Envoy whose load
+	// reports stopped without its stream closing.
+	staleLoadReport = 2 * time.Minute
+)
 
 // Config is the daemon's listen configuration.
 type Config struct {
@@ -40,6 +50,13 @@ type Config struct {
 	// StaticTargets are served as given, with no VAST cluster behind them
 	// (serve --static-target). They are for testing.
 	StaticTargets []xds.TargetSpec
+
+	// LoadReportInterval is how often each Envoy is asked to report load;
+	// zero means telemetry.DefaultLoadReportInterval.
+	LoadReportInterval time.Duration
+	// MetricsPerMember adds per-Envoy series to /metrics. Off by default:
+	// thousands of hosts make too many series.
+	MetricsPerMember bool
 }
 
 // Server is a configured, not yet listening, daemon.
@@ -48,10 +65,12 @@ type Server struct {
 	log      *slog.Logger
 	registry *prometheus.Registry
 
-	grpc  *grpc.Server
-	http  *http.Server
-	xds   *xds.Server
-	fleet *fleet.Registry
+	grpc      *grpc.Server
+	http      *http.Server
+	xds       *xds.Server
+	fleet     *fleet.Registry
+	agg       *metrics.Aggregator
+	telemetry *telemetry.Server
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -96,8 +115,21 @@ func New(cfg Config) (*Server, error) {
 	}
 	s.xds = x
 	s.xds.Register(s.grpc)
+
+	s.agg = metrics.New()
+	s.telemetry = telemetry.New(s.agg, log, cfg.LoadReportInterval, xds.ControlCluster)
+	s.telemetry.Register(s.grpc)
+	s.registry.MustRegister(collector{s: s, perMember: cfg.MetricsPerMember})
+
 	if len(cfg.StaticTargets) > 0 {
-		v, _, err := s.xds.Update(ctx, cfg.StaticTargets)
+		// Every target streams access logs to the daemon. (The per-target
+		// sampling knob of DESIGN.md amendment 8 arrives with target
+		// management.)
+		static := append([]xds.TargetSpec(nil), cfg.StaticTargets...)
+		for i := range static {
+			static[i].AccessLog = true
+		}
+		v, _, err := s.xds.Update(ctx, static)
 		if err != nil {
 			cancel()
 			return nil, fmt.Errorf("static targets: %w", err)
@@ -127,8 +159,12 @@ func (s *Server) routes() *http.ServeMux {
 			"go_version":   runtime.Version(),
 		})
 	})
-	mux.HandleFunc("GET /api/v1/fleet", s.handleFleet)
+	mux.HandleFunc("GET /api/v1/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/v1/targets", s.handleTargets)
+	mux.HandleFunc("GET /api/v1/endpoints", s.handleEndpoints)
+	mux.HandleFunc("GET /api/v1/fleet", s.handleFleet)
+	mux.HandleFunc("GET /api/v1/fleet/{node}", s.handleFleetMember)
+	mux.HandleFunc("GET /api/v1/events", s.handleEvents)
 	mux.Handle("GET /metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{Registry: s.registry}))
 	return mux
 }
@@ -189,6 +225,7 @@ func (s *Server) Run(ctx context.Context) error {
 				return
 			case <-tick.C:
 				s.fleet.Prune(fleetRetention)
+				s.agg.Prune(seriesRetention, staleLoadReport)
 			}
 		}
 	}()

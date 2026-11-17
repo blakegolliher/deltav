@@ -18,9 +18,9 @@ cobra 1.10 · Prometheus client 1.25 · Bubble Tea / Lip Gloss v2.1.1, Bubbles v
   daemon goes down, Envoys keep their last accepted config, so traffic keeps flowing; only
   telemetry is lost until it returns.
 - State: one JSON file in the state directory, mode 0600, written atomically (temp file and
-  rename). Metrics: in memory, in 10 s slots of fixed log-bucket histograms that merge into
+  rename). Metrics: in memory, in slots of fixed log-bucket histograms that add up to the
   1 m / 5 m / 1 h windows, one rollup per endpoint and one per fleet member (not the
-  cross-product). No dependency is needed for this.
+  cross-product). No dependency is needed for this. Amendment 18 has the details.
 - VAST access: a read-only `RoundTripper` allows only `GET` and the `POST`s to `/api/token/...`.
   Because it sits in the transport, redirected requests are checked too.
 
@@ -115,6 +115,33 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
 17. **503s can eject the only path to a backend.** Amendment 3's risk is concrete: five consecutive
     503s from one VIP eject it. The harness's refusing backend therefore answers 403. Whether VAST's
     `503 SlowDown` should count toward ejection is still open.
+
+### Milestone 3: telemetry
+
+18. **Rolling windows, as built.** Each series keeps 10 s slots for five minutes and 1 min slots
+    for an hour; the 1 m and 5 m windows sum the first, the 1 h window the second. A window is its
+    whole slots plus the elapsed part of the current one, and is capped at the daemon's age, so
+    rates are true from the first minute. Latency buckets grow by 2^(1/3) from 100 µs to 8.8 min,
+    so percentiles are good to about ±13%. A series that is busy for a whole hour holds about
+    35 KB; 5,000 busy Envoys are about 175 MB. Entries are counted when they arrive, not when the
+    request ended (Envoy flushes every second), which avoids trusting client clocks.
+19. **Requests with no endpoint are kept apart.** A request Envoy answers itself (no healthy host,
+    circuit breaker overflow) has no upstream address. It is counted under the target with an
+    empty endpoint, so it shows in the target's totals without being blamed on a VIP.
+20. **Load reports replace, not add; and they start late.** Envoy leaves idle endpoints out of a
+    report, so each report is taken as that Envoy's whole picture: an endpoint missing from it has
+    nothing in flight. Counts go when the reporting stream closes, or after two minutes without a
+    report. The request totals in load reports are independent of access logs and matched the
+    backends exactly in the integration test, with one exception that is Envoy's design: it
+    starts tracking a cluster at the first report tick after the cluster exists and resets the
+    cluster's counters as it does (`load_stats_reporter_impl.cc`: "for any newly created cluster,
+    we will always drop the data for the initial load report period"). So for up to one reporting
+    interval (5 s by default) after an Envoy starts or first learns a target, its requests are
+    missing from load-report totals and from the in-flight count. Access-log counts are not
+    affected. Milestone 7's limit must tolerate that blind interval.
+21. **Not done yet in this area.** The per-target access-log sampling knob (amendment 8) waits for
+    target management in milestone 6. Ingest cost is measured for the aggregator alone (about
+    125 ns per entry on the dev host); the rate through gRPC from a real fleet is not measured.
 
 ## Known gaps (POC)
 
