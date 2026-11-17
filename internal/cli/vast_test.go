@@ -183,3 +183,56 @@ func TestClientCommandsExplainAnUnreachableDaemon(t *testing.T) {
 		t.Fatalf("DELTAV_API was not used: %v", err)
 	}
 }
+
+func TestFleetAndNodeList(t *testing.T) {
+	api, mock := daemon(t)
+	t.Setenv("DELTAV_PASSWORD", vasttest.Password)
+	mustRun(t, "vast", "add", "lab", "--api", api, "--host", mock.Host(), "--user", vasttest.User, "--insecure")
+	mustRun(t, "target", "add", "s3", "--api", api, "--cluster", "lab", "--pool", "main", "--port", "80", "--listen-port", "9000")
+
+	// CNodes: three, ACTIVE, two VIPs of the target's pool each.
+	got := mustRun(t, "node", "list", "--api", api)
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if len(lines) != 4 || !strings.HasPrefix(lines[0], "CLUSTER") {
+		t.Fatalf("node list:\n%s", got)
+	}
+	for i, name := range []string{"cnode-3-10", "cnode-3-11", "cnode-3-12"} {
+		if row := strings.Join(strings.Fields(lines[i+1]), " "); row != "lab "+name+" ACTIVE 2 0 0.0 0.00 0.00 - - 0.0 0.0" {
+			t.Errorf("node list row %d: %q", i, row)
+		}
+	}
+	got = mustRun(t, "node", "list", "--api", api, "--vips", "--window", "1h")
+	if n := strings.Count(got, ":80"); n != 6 || strings.Count(got, "target s3") != 6 {
+		t.Errorf("node list --vips shows %d VIP rows, want 6:\n%s", n, got)
+	}
+	if err := json.Unmarshal([]byte(mustRun(t, "node", "list", "--api", api, "--json")), &struct{ CNodes []any }{}); err != nil {
+		t.Errorf("node list --json: %v", err)
+	}
+	if _, err := run(t, "dv", "node", "list", "--api", api, "--window", "2d"); err == nil || !strings.Contains(err.Error(), "1m, 5m or 1h") {
+		t.Errorf("bad window: %v", err)
+	}
+
+	// No Envoy has connected: an empty fleet, said plainly.
+	got = mustRun(t, "fleet", "list", "--api", api)
+	if !strings.HasPrefix(got, "NODE") || !strings.Contains(got, "Rows 0-0 of 0 matching; 0 Envoys, 0 connected") {
+		t.Errorf("fleet list with no Envoys:\n%s", got)
+	}
+	if _, err := run(t, "dv", "fleet", "list", "--api", api, "--sort", "bogus"); err == nil || !strings.Contains(err.Error(), "want one of") {
+		t.Errorf("bad sort key: %v", err)
+	}
+	var fl struct {
+		Total   int
+		Members []any
+	}
+	if err := json.Unmarshal([]byte(mustRun(t, "fleet", "list", "--api", api, "--json", "--state", "nacked", "--connected", "true", "--desc", "--filter", "x")), &fl); err != nil || fl.Members == nil {
+		t.Errorf("fleet list --json: %v %+v", err, fl)
+	}
+}
+
+// The TUI refuses to start without a terminal and says what to use instead.
+func TestTUINeedsATerminal(t *testing.T) {
+	_, err := run(t, "dv", "tui", "--api", "http://127.0.0.1:1")
+	if err == nil || !strings.Contains(err.Error(), "needs a terminal") {
+		t.Fatalf("got %v", err)
+	}
+}

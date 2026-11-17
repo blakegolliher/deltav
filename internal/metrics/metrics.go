@@ -166,6 +166,21 @@ func (r *ring) sum(now time.Time, n int, out *slot) {
 	}
 }
 
+// history adds the request counts of the n most recent complete slots into
+// out, oldest first. The current, partial slot is left out.
+func (r *ring) history(now time.Time, out []uint64) {
+	cur := now.UnixNano() / int64(r.length)
+	n := int64(len(out))
+	for i, s := range r.slots {
+		if s == nil {
+			continue
+		}
+		if age := cur - r.epoch[i]; age >= 1 && age <= n {
+			out[n-age] += s.Requests
+		}
+	}
+}
+
 type series struct {
 	fine, coarse ring
 	total        Totals
@@ -505,6 +520,41 @@ func (a *Aggregator) Rollup(w Window, group func(EndpointKey) (string, bool)) ma
 			ts.InFlight += v
 			out[name] = ts
 		}
+	}
+	return out
+}
+
+// HistoryPoints is how many points RateHistory returns: the complete
+// 10-second slots a series keeps, a little under five minutes.
+const HistoryPoints = fineSlots - 1
+
+// RateHistory returns, for each group of endpoints, the request rate per
+// second in each of the last HistoryPoints complete 10-second slots, oldest
+// first. It is what a sparkline draws.
+func (a *Aggregator) RateHistory(group func(EndpointKey) (string, bool)) map[string][]float64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	counts := map[string][]uint64{}
+	for k, s := range a.endpoints {
+		name, ok := group(k)
+		if !ok {
+			continue
+		}
+		c := counts[name]
+		if c == nil {
+			c = make([]uint64, HistoryPoints)
+			counts[name] = c
+		}
+		s.fine.history(now, c)
+	}
+	out := make(map[string][]float64, len(counts))
+	for name, c := range counts {
+		rates := make([]float64, len(c))
+		for i, n := range c {
+			rates[i] = float64(n) / fineSlot.Seconds()
+		}
+		out[name] = rates
 	}
 	return out
 }

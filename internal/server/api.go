@@ -143,6 +143,9 @@ type targetOverview struct {
 	// reports. Idle keep-alive connections are not counted.
 	InFlight uint64          `json:"in_flight"`
 	Stats    metrics.Summary `json:"stats"`
+	// RateHistory is the request rate per second in each of the last
+	// complete 10-second slots, oldest first, for a sparkline.
+	RateHistory []float64 `json:"rate_history"`
 }
 
 type overviewResponse struct {
@@ -160,9 +163,13 @@ func (s *Server) overview(win metrics.Window) overviewResponse {
 		Targets:       []targetOverview{},
 	}
 	stats := s.agg.Targets(win)
+	history := s.agg.RateHistory(func(k metrics.EndpointKey) (string, bool) { return k.Target, true })
 	idle := s.agg.Idle(win)
 	for _, t := range s.xds.Targets() {
 		o := targetOverview{Name: t.Name, ListenPort: t.ListenPort, TLS: t.TLS != nil, Endpoints: len(t.Endpoints), Stats: idle}
+		if o.RateHistory = history[t.Name]; o.RateHistory == nil {
+			o.RateHistory = make([]float64, metrics.HistoryPoints)
+		}
 		if ts, ok := stats[t.Name]; ok {
 			o.InFlight, o.Stats = ts.InFlight, ts.Summary
 			if ts.Summary.WindowSeconds == 0 {

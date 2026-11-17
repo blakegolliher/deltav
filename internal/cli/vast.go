@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
 
@@ -30,9 +32,9 @@ func newVastAddCmd() *cobra.Command {
 		Short: "Attach a VAST cluster (management endpoint and credentials)",
 		Long: "Attach a VAST cluster. The daemon logs in and reads the cluster once before storing\n" +
 			"it, so wrong credentials fail here. It only ever issues GETs and the token call.\n\n" +
-			"Give the password in DELTAV_PASSWORD or on standard input with --password-stdin;\n" +
-			"--password works too but leaves it in your shell history. The daemon keeps it in its\n" +
-			"state file (mode 0600) and never returns it.",
+			"At a terminal you are asked for the password. Otherwise give it in DELTAV_PASSWORD or\n" +
+			"on standard input with --password-stdin; --password works too but leaves it in your\n" +
+			"shell history. The daemon keeps it in its state file (mode 0600) and never returns it.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if host == "" || user == "" {
@@ -47,6 +49,16 @@ func newVastAddCmd() *cobra.Command {
 					return err
 				}
 				password = strings.TrimRight(string(b), "\r\n")
+			}
+			if password == "" && !passwordStdin && term.IsTerminal(os.Stdin.Fd()) {
+				// At a terminal: ask, without echoing.
+				fmt.Fprintf(cmd.ErrOrStderr(), "Password for %s on %s: ", user, host)
+				b, err := term.ReadPassword(os.Stdin.Fd())
+				fmt.Fprintln(cmd.ErrOrStderr())
+				if err != nil {
+					return err
+				}
+				password = string(b)
 			}
 			if password == "" {
 				return errors.New("no password: set DELTAV_PASSWORD, or pipe it in with --password-stdin")

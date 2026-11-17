@@ -74,24 +74,6 @@ func group(use, short string, children ...*cobra.Command) *cobra.Command {
 	return cmd
 }
 
-func newTUICmd() *cobra.Command {
-	return leaf("tui", "Terminal UI for a running daemon", 6)
-}
-
-func newFleetCmd() *cobra.Command {
-	return group("fleet", "Inspect the Envoy fleet",
-		leaf("list", "List connected Envoys with version, last seen and config status", 6),
-	)
-}
-
-func newNodeCmd() *cobra.Command {
-	return group("node", "Inspect and control VAST CNodes",
-		leaf("list", "List CNodes with state, VIPs, connections and traffic", 6),
-		leaf("drain CNODE", "Remove a CNode's VIPs from every Envoy", 7),
-		leaf("undrain CNODE", "Return a drained CNode's VIPs to service", 7),
-	)
-}
-
 func newLimitCmd() *cobra.Command {
 	return group("limit", "Per-CNode connection limits",
 		leaf("set TARGET", "Set a target's per-CNode connection limit and mode (alert|enforce)", 7),

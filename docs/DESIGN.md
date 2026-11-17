@@ -173,6 +173,19 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     untrusted certificate fail at `vast add`. The password is written to the state file (mode
     0600, replaced atomically) and is never returned by the API, logged, or put in an error.
 
+### Milestone 6: CLI and TUI
+
+27. **The TUI is driven by the event stream.** Each server-sent event carries the one-minute
+    overview and prompts a fresh read of whatever the current view shows, so there is one clock
+    (the daemon's) and no polling loop in the client. The fleet view asks the daemon for one
+    screen of rows at a time, sorted and filtered there. Colors are the terminal's own sixteen
+    plus bold, faint and reverse, so the UI follows the terminal's theme. The Controls view
+    lists clusters and targets; changing limits and draining CNodes arrive with milestone 7.
+    The order of the remaining milestones was changed by the user on 2026-11-17 to 6, 7, 5, 8.
+28. **Sparklines** come from the 10-second slots the aggregator already keeps: the request rate
+    in each of the last 29 complete slots, per target and per CNode, in the overview and CNode
+    responses (`rate_history`).
+
 ## Known gaps (POC)
 
 mTLS on the xDS and telemetry streams; daemon HA; per-group targeting of Envoys; long-term metric

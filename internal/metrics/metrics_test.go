@@ -322,3 +322,38 @@ func BenchmarkRecord(b *testing.B) {
 		a.Record("host-a", batch)
 	}
 }
+
+func TestRateHistory(t *testing.T) {
+	a, c := newAggregator()
+	// Two endpoints of one target: 1 and 2 requests a second for a minute,
+	// then a quiet minute, then half a slot at 5 a second.
+	for i := 0; i < 60; i++ {
+		a.Record("host-a", []Sample{ok("s3", "10.0.0.1:80", time.Millisecond)})
+		a.Record("host-a", []Sample{ok("s3", "10.0.0.2:80", time.Millisecond), ok("s3", "10.0.0.2:80", time.Millisecond)})
+		a.Record("host-a", []Sample{ok("other", "10.0.0.9:80", time.Millisecond)})
+		c.advance(time.Second)
+	}
+	c.advance(time.Minute)
+	for i := 0; i < 5; i++ {
+		a.Record("host-a", []Sample{ok("s3", "10.0.0.1:80", time.Millisecond), ok("s3", "10.0.0.1:80", time.Millisecond),
+			ok("s3", "10.0.0.1:80", time.Millisecond), ok("s3", "10.0.0.1:80", time.Millisecond), ok("s3", "10.0.0.1:80", time.Millisecond)})
+		c.advance(time.Second)
+	}
+	h := a.RateHistory(func(k EndpointKey) (string, bool) { return k.Target, k.Target == "s3" })
+	got := h["s3"]
+	if len(h) != 1 || len(got) != HistoryPoints {
+		t.Fatalf("history: %d groups, %d points", len(h), len(got))
+	}
+	// Oldest first: 17 empty slots, six at 3 req/s (both endpoints), six
+	// quiet. The current slot, half full, is not shown.
+	for i, v := range got {
+		want := 0.0
+		if i >= HistoryPoints-12 && i < HistoryPoints-6 {
+			want = 3
+		}
+		if v != want {
+			t.Errorf("point %d = %v, want %v (all: %v)", i, v, want, got)
+			break
+		}
+	}
+}

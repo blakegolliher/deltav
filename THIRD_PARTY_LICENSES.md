@@ -10,22 +10,38 @@ under `third_party/licenses/<library>/`. No upstream file has been modified.
 | Library | Version | License | Copyright (from upstream files) | NOTICE |
 |---|---|---|---|---|
 | [cel.dev/expr](https://github.com/cel-expr/cel-spec/blob/v0.25.2/LICENSE) | v0.25.2 | Apache-2.0 | not stated in upstream files | no |
+| [charm.land/bubbletea/v2](https://github.com/charmbracelet/bubbletea/blob/v2.1.1/LICENSE) | v2.1.1 | MIT | Copyright (c) 2020-2026 Charmbracelet, Inc. | no |
+| [charm.land/lipgloss/v2](https://github.com/charmbracelet/lipgloss/blob/v2.1.1/LICENSE) | v2.1.1 | MIT | Copyright (c) 2021-2026 Charmbracelet, Inc. | no |
 | [github.com/beorn7/perks/quantile](https://github.com/beorn7/perks/blob/v1.0.1/LICENSE) | v1.0.1 | MIT | Copyright (C) 2013 Blake Mizerany | no |
 | [github.com/cespare/xxhash/v2](https://github.com/cespare/xxhash/blob/v2.3.0/LICENSE.txt) | v2.3.0 | MIT | Copyright (c) 2016 Caleb Spare | no |
+| [github.com/charmbracelet/colorprofile](https://github.com/charmbracelet/colorprofile/blob/v0.4.3/LICENSE) | v0.4.3 | MIT | Copyright (c) 2020-2024 Charmbracelet, Inc | no |
+| [github.com/charmbracelet/ultraviolet](https://github.com/charmbracelet/ultraviolet/blob/6b8d4baf91b4/LICENSE) | v0.0.0-20261008173134-6b8d4baf91b4 | MIT | Copyright (c) 2025 Charmbracelet, Inc | no |
+| [github.com/charmbracelet/x/ansi](https://github.com/charmbracelet/x/blob/ansi/v0.11.9/ansi/LICENSE) | v0.11.9 | MIT | Copyright (c) 2023 Charmbracelet, Inc. | no |
+| [github.com/charmbracelet/x/termios](https://github.com/charmbracelet/x/blob/termios/v0.1.1/termios/LICENSE) | v0.1.1 | MIT | Copyright (c) 2023 Charmbracelet, Inc. | no |
+| [github.com/charmbracelet/x/term](https://github.com/charmbracelet/x/blob/term/v0.2.2/term/LICENSE) | v0.2.2 | MIT | Copyright (c) 2023 Charmbracelet, Inc. | no |
+| [github.com/charmbracelet/x/windows](https://github.com/charmbracelet/x/blob/windows/v0.2.2/windows/LICENSE) | v0.2.2 | MIT | Copyright (c) 2023 Charmbracelet, Inc. | no |
+| [github.com/clipperhouse/displaywidth](https://github.com/clipperhouse/displaywidth/blob/v0.11.0/LICENSE) | v0.11.0 | MIT | Copyright (c) 2025 Matt Sherman | no |
+| [github.com/clipperhouse/uax29/v2/graphemes](https://github.com/clipperhouse/uax29/blob/v2.7.0/LICENSE) | v2.7.0 | MIT | Copyright (c) 2020 Matt Sherman | no |
 | [github.com/cncf/xds/go](https://github.com/cncf/xds/blob/dba9d589def2/go/LICENSE) | v0.0.0-20260202195803-dba9d589def2 | Apache-2.0 | not stated in upstream files | no |
 | [github.com/envoyproxy/go-control-plane/envoy](https://github.com/envoyproxy/go-control-plane/blob/envoy/v1.40.0/envoy/LICENSE) | v1.40.0 | Apache-2.0 | not stated in upstream files | no |
 | [github.com/envoyproxy/go-control-plane/pkg](https://github.com/envoyproxy/go-control-plane/blob/v0.14.0/LICENSE) | v0.14.0 | Apache-2.0 | Copyright 2020 Envoyproxy Authors (source headers) | no |
 | [github.com/envoyproxy/go-control-plane/ratelimit/service/ratelimit/v3](https://github.com/envoyproxy/go-control-plane/blob/ratelimit/v0.1.0/ratelimit/LICENSE) | v0.1.0 | Apache-2.0 | not stated in upstream files | no |
 | [github.com/envoyproxy/protoc-gen-validate/validate](https://github.com/envoyproxy/protoc-gen-validate/blob/v1.3.3/LICENSE) | v1.3.3 | Apache-2.0 | not stated in upstream files | no |
+| [github.com/lucasb-eyer/go-colorful](https://github.com/lucasb-eyer/go-colorful/blob/v1.4.1/LICENSE) | v1.4.1 | MIT | Copyright (c) 2013 Lucas Beyer | no |
+| [github.com/mattn/go-runewidth](https://github.com/mattn/go-runewidth/blob/v0.0.30/LICENSE) | v0.0.30 | MIT | Copyright (c) 2016 Yasuhiro Matsumoto | no |
+| [github.com/muesli/cancelreader](https://github.com/muesli/cancelreader/blob/v0.2.2/LICENSE) | v0.2.2 | MIT | Copyright (c) 2022 Erik Geiser and Christian Muehlhaeuser | no |
 | [github.com/munnerz/goautoneg](https://github.com/munnerz/goautoneg/blob/a7dc8b61c822/LICENSE) | v0.0.0-20191010083416-a7dc8b61c822 | BSD-3-Clause | Copyright (c) 2011, Open Knowledge Foundation Ltd. | no |
 | [github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil](https://github.com/prometheus/client_golang/blob/v1.25.0/internal/github.com/golang/gddo/LICENSE) | v1.25.0 | BSD-3-Clause | Copyright (c) 2013 The Go Authors. All rights reserved. | no |
 | [github.com/prometheus/client_golang/prometheus](https://github.com/prometheus/client_golang/blob/v1.25.0/LICENSE) | v1.25.0 | Apache-2.0 | Copyright 2012-2015 The Prometheus Authors | yes |
 | [github.com/prometheus/client_model/go](https://github.com/prometheus/client_model/blob/v0.6.3/LICENSE) | v0.6.3 | Apache-2.0 | Copyright 2012-2015 The Prometheus Authors | yes |
 | [github.com/prometheus/common](https://github.com/prometheus/common/blob/v0.72.0/LICENSE) | v0.72.0 | Apache-2.0 | Copyright 2015 The Prometheus Authors | yes |
 | [github.com/prometheus/procfs](https://github.com/prometheus/procfs/blob/v0.22.0/LICENSE) | v0.22.0 | Apache-2.0 | Copyright 2014-2015 The Prometheus Authors | yes |
+| [github.com/rivo/uniseg](https://github.com/rivo/uniseg/blob/v0.4.7/LICENSE.txt) | v0.4.7 | MIT | Copyright (c) 2019 Oliver Kuederle | no |
 | [github.com/spf13/cobra](https://github.com/spf13/cobra/blob/v1.10.2/LICENSE.txt) | v1.10.2 | Apache-2.0 | Copyright 2013-2023 The Cobra Authors (source headers) | no |
 | [github.com/spf13/pflag](https://github.com/spf13/pflag/blob/v1.0.9/LICENSE) | v1.0.9 | BSD-3-Clause | Copyright (c) 2012 Alex Ogier. All rights reserved. | no |
+| [github.com/xo/terminfo](https://github.com/xo/terminfo/blob/v1.0.0/LICENSE) | v1.0.0 | MIT | Copyright (c) 2016 Anmol Sethi | no |
 | [golang.org/x/net](https://cs.opensource.google/go/x/net/+/v0.59.0:LICENSE) | v0.59.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
+| [golang.org/x/sync/errgroup](https://cs.opensource.google/go/x/sync/+/v0.23.0:LICENSE) | v0.23.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
 | [golang.org/x/sys/unix](https://cs.opensource.google/go/x/sys/+/v0.48.0:LICENSE) | v0.48.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
 | [golang.org/x/text](https://cs.opensource.google/go/x/text/+/v0.42.0:LICENSE) | v0.42.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
 | [google.golang.org/genproto/googleapis/api](https://github.com/googleapis/go-genproto/blob/0afa2a65878a/googleapis/api/LICENSE) | v0.0.0-20260720211330-0afa2a65878a | Apache-2.0 | Copyright 2025 Google LLC (source headers) | no |

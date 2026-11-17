@@ -5,12 +5,13 @@ the VIPs of one or more VAST clusters, with no proxy machines in the data path. 
 endpoints over xDS, collects telemetry from every Envoy over the streams Envoy opens, and shows
 what the fleet and the CNodes are doing.
 
-**Status: proof of concept, milestone 4 of 8.** The daemon reads healthy endpoints from VAST clusters (or takes a static list),
+**Status: proof of concept; milestones 1 to 4 and 6 of 8 are done.** Still to come, in this
+order: per-CNode connection limits and CNode drain (7), the web UI (5), and packaging with a
+quick start (8). The daemon reads healthy endpoints from VAST clusters (or takes a static list),
 serves them to Envoy over xDS and tracks every connected Envoy; it ingests Envoy's access logs and
 load reports and keeps rolling per-endpoint, per-CNode and per-Envoy stats, served by the
-`/api/v1` endpoints below and `/metrics`; `deltav bootstrap` prints the client bootstrap; a test
-harness (`dvlab`) provides fake S3 backends and a load generator. The UIs come in later
-milestones.
+`/api/v1` endpoints below and `/metrics`; the CLI and a terminal UI read that API; `deltav bootstrap` prints the client
+bootstrap; a test harness (`dvlab`) provides fake S3 backends and a load generator.
 See [docs/DESIGN.md](docs/DESIGN.md). A ten-minute quick start comes
 with milestone 8.
 
@@ -51,6 +52,26 @@ healthy CNodes. The daemon reads the cluster every 10 s with three GETs; it can 
 but GETs and the token call. If VAST is unreachable, or the daemon restarts, Envoys keep being
 served the last known endpoints. TLS verification of the VAST API is on unless the cluster is
 added with `--insecure`.
+
+## Watch it
+
+```sh
+deltav tui                    # live terminal UI
+deltav node list --vips       # CNodes with state, VIPs, requests in flight, rates and latency
+deltav fleet list --sort request_rate --desc --limit 20
+deltav fleet list --state nacked     # Envoys that rejected the config, with Envoy's reason
+```
+
+The terminal UI has four views, switched with `1`-`4` or `tab`: **Overview** (per target:
+endpoints, requests in flight, request and byte rates, 403s and 503s, latency, a five-minute
+sparkline), **CNodes** (the same per CNode; `enter` shows its VIPs), **Fleet** (every Envoy; `/`
+filters, `s` sorts, `a` and `c` narrow by config state and connection, `pgup`/`pgdn` page; the
+daemon does the paging, so it stays quick with thousands of Envoys) and **Controls** (attached
+clusters and targets). `w` cycles the window between 1m, 5m and 1h; `q` quits. It follows the
+daemon's event stream and uses the terminal's own colors, so it suits light and dark themes.
+
+All three take `--api` (default `http://127.0.0.1:18080`, or `DELTAV_API`) and, for a daemon
+that requires it, `DELTAV_API_TOKEN`. The list commands take `--json`.
 
 ## Try it without a VAST cluster
 

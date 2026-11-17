@@ -266,10 +266,13 @@ type cnodeJSON struct {
 	IsMgmt   bool `json:"is_mgmt"`
 	// VIPs counts the VIPs this CNode hosts in the pools of configured
 	// targets; a CNode hosts many more in pools Delta-V does not serve.
-	VIPs      int             `json:"vips"`
-	InFlight  uint64          `json:"in_flight"`
-	Stats     metrics.Summary `json:"stats"`
-	Endpoints []endpointStats `json:"endpoints"` // one row per VIP and target
+	VIPs     int             `json:"vips"`
+	InFlight uint64          `json:"in_flight"`
+	Stats    metrics.Summary `json:"stats"`
+	// RateHistory is the request rate per second in each of the last
+	// complete 10-second slots, oldest first, for a sparkline.
+	RateHistory []float64       `json:"rate_history"`
+	Endpoints   []endpointStats `json:"endpoints"` // one row per VIP and target
 }
 
 type cnodesResponse struct {
@@ -299,10 +302,12 @@ func (s *Server) handleCNodes(w http.ResponseWriter, r *http.Request) {
 		name := cnodeOf[k]
 		return cnodeKey{cluster, name}, vastTarget && name != ""
 	}
-	rollup := s.agg.Rollup(win, func(k metrics.EndpointKey) (string, bool) {
+	byCNode := func(k metrics.EndpointKey) (string, bool) {
 		ck, ok := group(k)
 		return ck.cluster + "\x00" + ck.name, ok
-	})
+	}
+	rollup := s.agg.Rollup(win, byCNode)
+	history := s.agg.RateHistory(byCNode)
 	keys := make([]metrics.EndpointKey, 0, len(cnodeOf))
 	for k := range cnodeOf {
 		keys = append(keys, k)
@@ -351,6 +356,9 @@ func (s *Server) handleCNodes(w http.ResponseWriter, r *http.Request) {
 			}
 			if cj.Endpoints == nil {
 				cj.Endpoints = []endpointStats{}
+			}
+			if cj.RateHistory = history[c.Name+"\x00"+n.Name]; cj.RateHistory == nil {
+				cj.RateHistory = make([]float64, metrics.HistoryPoints)
 			}
 			if ts, ok := rollup[c.Name+"\x00"+n.Name]; ok {
 				cj.InFlight = ts.InFlight
