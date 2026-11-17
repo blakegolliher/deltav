@@ -140,6 +140,17 @@ func sample() *Model {
 		{Name: "fixed", ListenPort: 9002, Source: "static", Endpoints: make([]struct{}, 3)},
 	}
 	m.loaded = true
+
+	// A limit on main, in enforce mode, with cnode-3-10 over it; and
+	// cnode-3-12 drained.
+	over := Usage{Target: "main", Cluster: "lab", CNode: "cnode-3-10", InFlight: 130, PerCNode: 100, Mode: "enforce", Over: true}
+	limit := &LimitStatus{PerCNode: 100, Mode: "enforce", Share: 5, Computed: 4, Envoys: 12, MaxVIPsPerCNode: 2}
+	m.overview.Targets[0].Limit, m.overview.Targets[0].Over = limit, []Usage{over}
+	m.cnodes.CNodes[0].Limits = []Usage{over}
+	m.cnodes.CNodes[1].Limits = []Usage{{Target: "main", Cluster: "lab", CNode: "cnode-3-11", InFlight: 0, PerCNode: 100}}
+	m.cnodes.CNodes[2].Drained = true
+	m.targets[0].Status.Limit, m.targets[0].Status.Drained, m.targets[0].Over = limit, 2, []Usage{over}
+	m.control = m.cnodes.CNodes
 	return m
 }
 
@@ -185,6 +196,7 @@ func TestOverviewView(t *testing.T) {
 		"Fleet  12 Envoys connected (10 in sync, 1 rejected the config, 1 pending), 2 disconnected",
 		"TARGET", "LISTEN", "IN FLIGHT", "LAST 5 MIN",
 		"main", "127.0.0.1:9000", "120", "3.2", "10.1", "2.1ms", "31ms", "0.4", "▁", "█",
+		"LIMIT", "100 enforce OVER", "Over the limit: main on cnode-3-10 has 130 in flight, limit 100",
 		"archive", "127.0.0.1:9001", "·····",
 		"q quit")
 	if v := m.View(); !v.AltScreen {
@@ -209,7 +221,8 @@ func TestCNodesView(t *testing.T) {
 	m := sample()
 	press(m, "2")
 	s := screen(m)
-	expect(t, s, "CNODE", "STATE", "VIPS", "cnode-3-10 leader", "cnode-3-11", "INACTIVE", "cnode-3-12 mgmt", "Idle keep-alive connections are not counted")
+	expect(t, s, "CNODE", "STATE", "VIPS", "cnode-3-10 leader", "cnode-3-11", "INACTIVE", "cnode-3-12 mgmt", "Idle keep-alive connections are not counted",
+		"OF LIMIT", "130/100 OVER", "0/100", "ACTIVE drained")
 	if strings.Contains(s, "192.0.2.28:80") {
 		t.Error("VIP rows are shown before the CNode is expanded")
 	}
@@ -290,13 +303,89 @@ func TestFleetView(t *testing.T) {
 
 func TestControlsView(t *testing.T) {
 	m := sample()
+	m.height = 50
 	press(m, "4")
 	expect(t, screen(m), "VAST clusters", "lab", "vast.example.com", "187", "5s ago", "ok",
-		"Targets", "main", "lab / main", "4 of 6 VIPs on healthy CNodes", "fixed", "static", "fixed endpoint list",
-		"are not built yet")
+		"Targets", "main", "lab / main", "100 enforce OVER: 5 per Envoy per VIP (4 held back)", "4 of 6 VIPs on healthy CNodes, 2 withheld by drain",
+		"fixed", "static", "fixed endpoint list",
+		"CNodes", "lab / cnode-3-10", "130/100 OVER", "lab / cnode-3-12", "ACTIVE drained",
+		// The two things to know about enforce, next to the control.
+		"limit ÷ (connected Envoys × most VIPs on", "never below 1", "makes Envoys reconnect",
+		"e set limit", "m alert/enforce", "d drain/undrain")
 	m.clusters[0].LastError = "status 500"
 	m.targets[0].Status = &TargetStatus{Problem: `cluster "lab" has no VIP pool "main"`, Held: true}
 	expect(t, screen(m), "failing: status 500", `serving the last known endpoints: cluster "lab" has no VIP pool "main"`)
+}
+
+func TestControlsActions(t *testing.T) {
+	m := sample()
+	m.height = 50
+	press(m, "4")
+
+	// e on a target: a prompt, holding the current limit, that takes digits
+	// only.
+	press(m, "e")
+	if m.editing == nil || m.editing.target != "main" || m.editing.draft != "100" || m.editing.mode != "enforce" {
+		t.Fatalf("after e: %+v", m.editing)
+	}
+	expect(t, screen(m), "Connections per CNode for main, 0 for no limit: 100█", "enter apply")
+	press(m, "backspace", "backspace", "5", "x", "q", "2")
+	if m.editing.draft != "152" || m.tab != tabControls {
+		t.Errorf("while typing: draft %q, view %d", m.editing.draft, m.tab)
+	}
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.editing != nil || cmd == nil {
+		t.Fatalf("after enter: editing %+v, command %v", m.editing, cmd != nil)
+	}
+	// esc leaves things alone.
+	press(m, "e", "9", "esc")
+	if m.editing != nil {
+		t.Error("esc did not close the prompt")
+	}
+	// m flips the mode of a target that has a limit.
+	if _, cmd = m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"}); cmd == nil {
+		t.Error("m on a target with a limit did nothing")
+	}
+	// A static target has no CNodes to limit.
+	press(m, "down", "e")
+	if m.editing != nil || !strings.Contains(m.errText, "static target") {
+		t.Errorf("e on a static target: editing %+v, error %q", m.editing, m.errText)
+	}
+	press(m, "d")
+	if m.confirm != nil || !strings.Contains(m.errText, "move to a CNode") {
+		t.Errorf("d on a target: confirm %+v, error %q", m.confirm, m.errText)
+	}
+
+	// d on a CNode asks first, and only y goes ahead.
+	press(m, "down", "d")
+	if m.confirm == nil || m.confirm.cnode != "cnode-3-10" || m.confirm.cluster != "lab" || !m.confirm.drain {
+		t.Fatalf("d on cnode-3-10: %+v", m.confirm)
+	}
+	expect(t, screen(m), "Drain cnode-3-10? Its VIPs leave every Envoy at once; requests in flight finish.", "y drain")
+	if _, cmd = m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"}); cmd != nil || m.confirm != nil {
+		t.Error("n did not cancel the drain")
+	}
+	press(m, "d")
+	if _, cmd = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"}); cmd == nil || m.confirm != nil {
+		t.Error("y did not go ahead with the drain")
+	}
+	// On a drained CNode the question is the other way round.
+	press(m, "down", "down", "d")
+	if m.confirm == nil || m.confirm.cnode != "cnode-3-12" || m.confirm.drain {
+		t.Fatalf("d on the drained cnode-3-12: %+v", m.confirm)
+	}
+	expect(t, screen(m), "Undrain cnode-3-12?")
+	press(m, "esc")
+
+	// What a change did is shown; a failure replaces it.
+	m.Update(actionMsg{done: "main: limit 152 connections per CNode, enforce mode"})
+	expect(t, screen(m), "✓ main: limit 152 connections per CNode, enforce mode")
+	m.Update(actionMsg{err: fmt.Errorf(`no target "main"`)})
+	s := screen(m)
+	expect(t, s, `! no target "main"`)
+	if strings.Contains(s, "✓") {
+		t.Error("a success notice stayed after a failure")
+	}
 }
 
 func TestNavigationAndStatus(t *testing.T) {
@@ -477,6 +566,30 @@ func TestAgainstADaemon(t *testing.T) {
 	if s := screen(m); strings.Count(s, ":80") != 2 || !strings.Contains(s, "└ ") {
 		t.Errorf("expanded CNode:\n%s", s)
 	}
+
+	// Changes from the Controls view go through the same API.
+	_, cmd = m.Update(tea.KeyPressMsg{Code: '4', Text: "4"})
+	run(t, m, cmd)
+	m.height = 50
+	press(m, "e", "5")
+	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	run(t, m, cmd)
+	expect(t, screen(m), "✓ main: limit 5 connections per CNode, alert mode", "5 alert")
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	run(t, m, cmd)
+	// Three Envoys, two VIPs per CNode: 5 / 6 rounds down to the floor of 1.
+	expect(t, screen(m), "✓ main: limit 5 is now in enforce mode", "5 enforce: 1 per Envoy per VIP")
+	press(m, "down", "down", "d") // the second CNode
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	run(t, m, cmd)
+	expect(t, screen(m), "✓ drained cnode-3-11: its VIPs have left every Envoy", "ACTIVE drained", "6 of 6 VIPs on healthy CNodes, 2 withheld by drain")
+	press(m, "d")
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	run(t, m, cmd)
+	if s := screen(m); strings.Contains(s, "ACTIVE drained") || !strings.Contains(s, "✓ undrained cnode-3-11") {
+		t.Errorf("after undraining:\n%s", s)
+	}
+	m.height = 40
 
 	// A filter is applied by the daemon.
 	_, cmd = m.Update(tea.KeyPressMsg{Code: '3', Text: "3"})

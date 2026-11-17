@@ -166,10 +166,7 @@ func (s stats) cells(inFlight uint64) []string {
 
 func newNodeCmd() *cobra.Command {
 	return group("node", "Inspect and control VAST CNodes",
-		newNodeListCmd(),
-		leaf("drain CNODE", "Remove a CNode's VIPs from every Envoy", 7),
-		leaf("undrain CNODE", "Return a drained CNode's VIPs to service", 7),
-	)
+		newNodeListCmd(), drainCmd(true), drainCmd(false))
 }
 
 func newNodeListCmd() *cobra.Command {
@@ -193,14 +190,20 @@ func newNodeListCmd() *cobra.Command {
 				Stats            stats  `json:"stats"`
 			}
 			type cnode struct {
-				Cluster, Name, State string
-				Enabled, Healthy     bool
-				VIPs                 int
-				InFlight             uint64 `json:"in_flight"`
-				Stats                stats  `json:"stats"`
-				Endpoints            []row
+				Cluster, Name, State      string
+				Enabled, Healthy, Drained bool
+				VIPs                      int
+				InFlight                  uint64 `json:"in_flight"`
+				Stats                     stats  `json:"stats"`
+				Endpoints                 []row
+				Limits                    []struct {
+					Target   string
+					InFlight uint64 `json:"in_flight"`
+					PerCNode uint32 `json:"per_cnode"`
+					Over     bool
+				}
 			}
-			header := "CLUSTER\tCNODE\tSTATE\tVIPS\tIN FLIGHT\tREQ/S\tMB/S IN\tMB/S OUT\tP50\tP99\t403/S\t503/S"
+			header := "CLUSTER\tCNODE\tSTATE\tVIPS\tIN FLIGHT\tREQ/S\tMB/S IN\tMB/S OUT\tP50\tP99\t403/S\t503/S\tLIMIT"
 			return show(cmd, &f, "/api/v1/cnodes?window="+url.QueryEscape(window), header,
 				func(v struct{ CNodes []cnode }) [][]string {
 					var rows [][]string
@@ -211,8 +214,23 @@ func newNodeListCmd() *cobra.Command {
 							state += " (disabled)"
 						case !c.Healthy:
 							state += " (not serving)"
+						case c.Drained:
+							state += " (drained)"
 						}
-						rows = append(rows, append([]string{c.Cluster, c.Name, state, strconv.Itoa(c.VIPs)}, c.Stats.cells(c.InFlight)...))
+						// In flight against each target's limit: "s3 6 of 5 OVER".
+						var limits []string
+						for _, l := range c.Limits {
+							cell := fmt.Sprintf("%s %d of %d", l.Target, l.InFlight, l.PerCNode)
+							if l.Over {
+								cell += " OVER"
+							}
+							limits = append(limits, cell)
+						}
+						if len(limits) == 0 {
+							limits = []string{"-"}
+						}
+						row := append([]string{c.Cluster, c.Name, state, strconv.Itoa(c.VIPs)}, c.Stats.cells(c.InFlight)...)
+						rows = append(rows, append(row, strings.Join(limits, ", ")))
 						if vips {
 							for _, e := range c.Endpoints {
 								rows = append(rows, append([]string{"", "  " + e.Endpoint, strings.TrimSpace("target " + e.Target), ""}, e.Stats.cells(e.InFlight)...))

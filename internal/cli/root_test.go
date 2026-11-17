@@ -89,10 +89,3 @@ func TestServeHelpDocumentsEnv(t *testing.T) {
 		}
 	}
 }
-
-func TestUnimplementedCommandsSayWhen(t *testing.T) {
-	_, err := run(t, "dv", "node", "drain", "cnode-1")
-	if err == nil || !strings.Contains(err.Error(), "milestone 7") || !strings.Contains(err.Error(), "dv node drain") {
-		t.Fatalf("got %v", err)
-	}
-}

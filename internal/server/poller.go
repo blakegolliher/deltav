@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"deltav/internal/limit"
 	"deltav/internal/state"
 	"deltav/internal/vast"
 	"deltav/internal/xds"
@@ -42,12 +43,32 @@ type clusterView struct {
 
 // targetStatus says how a VAST target resolved at the last poll.
 type targetStatus struct {
-	VIPs    int    `json:"vips"`              // VIPs in the pool
-	Healthy int    `json:"healthy"`           // of those, on a healthy CNode
+	VIPs    int `json:"vips"`    // VIPs in the pool
+	Healthy int `json:"healthy"` // of those, on a healthy CNode
+	// Drained counts VIPs on a healthy CNode that are withheld because an
+	// operator drained that CNode.
+	Drained int    `json:"drained,omitempty"`
 	Problem string `json:"problem,omitempty"` // why it could not be resolved
 	// Held is true while the endpoints served are the last known ones and
 	// not what the latest poll said (or there has been no poll yet).
-	Held bool `json:"held,omitempty"`
+	Held  bool         `json:"held,omitempty"`
+	Limit *limitStatus `json:"limit,omitempty"`
+}
+
+// limitStatus is a target's per-CNode connection limit and, in enforce
+// mode, how it is being divided among Envoys.
+type limitStatus struct {
+	PerCNode uint32 `json:"per_cnode"`
+	Mode     string `json:"mode"`
+	// Share is the connections each Envoy may open to each VIP, as now
+	// served; 0 in alert mode, where nothing is enforced.
+	Share uint32 `json:"share"`
+	// Computed is the share worked out at the last poll. It differs from
+	// Share while a change is held back so that Envoys are not made to
+	// reconnect their pools for every Envoy that joins or leaves.
+	Computed        uint32 `json:"computed"`
+	Envoys          int    `json:"envoys"`             // connected Envoys the limit is divided among
+	MaxVIPsPerCNode int    `json:"max_vips_per_cnode"` // most VIPs of this target on one CNode
 }
 
 type apiEntry struct {
@@ -66,12 +87,18 @@ type poller struct {
 	pollMu  sync.Mutex // one poll at a time
 	applyMu sync.Mutex // one apply at a time: compute and publish together
 
-	mu     sync.Mutex
-	apis   map[string]apiEntry
-	views  map[string]*clusterView
-	served map[string][]xds.Endpoint // per VAST target: endpoints now served
-	empty  map[string]int            // per VAST target: polls in a row without endpoints
-	status map[string]targetStatus
+	mu       sync.Mutex
+	apis     map[string]apiEntry
+	views    map[string]*clusterView
+	served   map[string][]xds.Endpoint // per VAST target: endpoints now served
+	empty    map[string]int            // per VAST target: polls in a row without endpoints
+	status   map[string]targetStatus
+	debounce map[string]*limit.Debouncer // per VAST target: the enforced share
+	now      func() time.Time
+
+	// How a change of share is held back; see limit.Debouncer.
+	minChange   float64
+	minInterval time.Duration
 }
 
 func newPoller(s *Server, interval time.Duration) *poller {
@@ -82,6 +109,14 @@ func newPoller(s *Server, interval time.Duration) *poller {
 		s: s, interval: interval, kick: make(chan struct{}, 1),
 		apis: map[string]apiEntry{}, views: map[string]*clusterView{},
 		served: map[string][]xds.Endpoint{}, empty: map[string]int{}, status: map[string]targetStatus{},
+		debounce: map[string]*limit.Debouncer{}, now: time.Now,
+		minChange: s.cfg.LimitMinChange, minInterval: s.cfg.LimitMinInterval,
+	}
+	if p.minChange <= 0 {
+		p.minChange = limit.DefaultMinChange
+	}
+	if p.minInterval <= 0 {
+		p.minInterval = limit.DefaultMinInterval
 	}
 	p.newAPI = func(c state.Cluster) (vast.API, error) {
 		return vast.New(vast.Options{
@@ -89,12 +124,21 @@ func newPoller(s *Server, interval time.Duration) *poller {
 			Timeout: 15 * time.Second,
 		})
 	}
-	// Endpoints served before the last shutdown, so that a restarted
-	// daemon offers Envoys the same config at once.
-	for name, eps := range s.store.LoadEndpoints() {
+	// What was served before the last shutdown, so that a restarted daemon
+	// offers Envoys the same config at once: the endpoints, and any
+	// enforced share. Without the share the first snapshot would be worked
+	// out for a fleet of none, and loosen every limit until the fleet had
+	// reconnected and the debounce interval had passed.
+	cache := s.store.LoadCache()
+	for name, eps := range cache.Endpoints {
 		for _, e := range eps {
 			p.served[name] = append(p.served[name], xds.Endpoint{IP: e.IP, Port: e.Port, CNode: e.CNode})
 		}
+	}
+	for name, share := range cache.Shares {
+		d := &limit.Debouncer{MinChange: p.minChange, MinInterval: p.minInterval}
+		d.Restore(share, p.now())
+		p.debounce[name] = d
 	}
 	return p
 }
@@ -204,8 +248,9 @@ func (p *poller) pollOnce(ctx context.Context) {
 }
 
 // resolve finds the endpoints of a target in a cluster view: the VIPs of
-// its pool that sit on a healthy CNode, sorted by address.
-func resolve(t state.Target, v *clusterView) ([]xds.Endpoint, targetStatus) {
+// its pool that sit on a healthy CNode that is not drained, sorted by
+// address. drained holds the names of the cluster's drained CNodes.
+func resolve(t state.Target, v *clusterView, drained map[string]bool) ([]xds.Endpoint, targetStatus) {
 	var st targetStatus
 	var pools []vast.VIPPool
 	for _, p := range v.Pools {
@@ -244,6 +289,10 @@ func resolve(t state.Target, v *clusterView) ([]xds.Endpoint, targetStatus) {
 		// did not list, is left out.
 		if c, ok := cnodes[vip.CNode]; ok && c.Healthy() {
 			st.Healthy++
+			if drained[vip.CNode] {
+				st.Drained++
+				continue
+			}
 			eps = append(eps, xds.Endpoint{IP: vip.IP, Port: t.Port, CNode: vip.CNode})
 		}
 	}
@@ -266,6 +315,15 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 	p.mu.Lock()
 	specs := p.s.staticSpecs()
 	targets := p.s.store.Targets()
+	drained := map[string]map[string]bool{} // cluster -> CNode names
+	for _, d := range p.s.store.Drained() {
+		if drained[d.Cluster] == nil {
+			drained[d.Cluster] = map[string]bool{}
+		}
+		drained[d.Cluster][d.CNode] = true
+	}
+	envoys := p.s.fleet.Connected()
+	now := p.now()
 	known := map[string]bool{}
 	for _, t := range targets {
 		known[t.Name] = true
@@ -289,15 +347,45 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 			}
 			eps, st.Held = prev, true
 		default:
-			eps, st = resolve(t, view)
-			if len(eps) > 0 {
+			eps, st = resolve(t, view, drained[t.Cluster])
+			switch {
+			case len(eps) > 0:
 				p.empty[t.Name] = 0
-			} else if p.empty[t.Name]++; had && len(prev) > 0 && p.empty[t.Name] < emptyHold {
-				eps, st.Held = prev, true
+			case st.Problem == "" && st.Drained > 0 && st.Drained == st.Healthy:
+				// Emptied by draining: that is an operator's decision,
+				// not an odd answer from VAST. It takes effect now.
+				p.empty[t.Name] = 0
+			default:
+				if p.empty[t.Name]++; had && len(prev) > 0 && p.empty[t.Name] < emptyHold {
+					eps, st.Held = prev, true
+				}
 			}
 		}
-		p.served[t.Name], p.status[t.Name] = eps, st
 		spec := xds.TargetSpec{Name: t.Name, ListenPort: t.ListenPort, Endpoints: eps, AccessLog: true}
+		if t.Limit != nil {
+			ls := &limitStatus{PerCNode: t.Limit.PerCNode, Mode: t.Limit.Mode, Envoys: envoys}
+			perCNode := map[string]int{}
+			for _, e := range eps {
+				perCNode[e.CNode]++
+				ls.MaxVIPsPerCNode = max(ls.MaxVIPsPerCNode, perCNode[e.CNode])
+			}
+			want := uint32(0)
+			if t.Limit.Mode == state.ModeEnforce {
+				ls.Computed = limit.Share(t.Limit.PerCNode, envoys, ls.MaxVIPsPerCNode)
+				want = ls.Computed
+			}
+			d := p.debounce[t.Name]
+			if d == nil {
+				d = &limit.Debouncer{MinChange: p.minChange, MinInterval: p.minInterval}
+				p.debounce[t.Name] = d
+			}
+			ls.Share, _ = d.Next(now, want)
+			spec.PerHostLimit = ls.Share
+			st.Limit = ls
+		} else {
+			delete(p.debounce, t.Name) // also drops a share restored for a limit since removed
+		}
+		p.served[t.Name], p.status[t.Name] = eps, st
 		if t.TLS != nil {
 			spec.TLS = &xds.TLSSpec{ServerName: t.TLS.ServerName, CAFile: t.TLS.CAFile, Insecure: t.TLS.Insecure}
 		}
@@ -312,12 +400,18 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 		if !known[name] {
 			delete(p.status, name)
 			delete(p.empty, name)
+			delete(p.debounce, name)
 		}
 	}
-	cache := make(map[string][]state.Endpoint, len(p.served))
+	cache := state.Cache{Endpoints: make(map[string][]state.Endpoint, len(p.served)), Shares: map[string]uint32{}}
 	for name, eps := range p.served {
 		for _, e := range eps {
-			cache[name] = append(cache[name], state.Endpoint{IP: e.IP, Port: e.Port, CNode: e.CNode})
+			cache.Endpoints[name] = append(cache.Endpoints[name], state.Endpoint{IP: e.IP, Port: e.Port, CNode: e.CNode})
+		}
+	}
+	for name, d := range p.debounce {
+		if d.Current() > 0 {
+			cache.Shares[name] = d.Current()
 		}
 	}
 	p.mu.Unlock()
@@ -329,8 +423,8 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 	}
 	if changed {
 		p.s.log.Info("targets updated", "targets", len(specs), "config_version", version)
-		if err := p.s.store.SaveEndpoints(cache); err != nil {
-			p.s.log.Warn("cannot save the endpoint cache", "error", err)
+		if err := p.s.store.SaveCache(cache); err != nil {
+			p.s.log.Warn("cannot save the cache of what is served", "error", err)
 		}
 	}
 	return version, changed, nil
@@ -345,6 +439,16 @@ func (p *poller) view(cluster string) *clusterView {
 		return &c
 	}
 	return nil
+}
+
+// limitChanged makes the next apply push a target's share at once: an
+// operator changing a limit should not wait out the debounce.
+func (p *poller) limitChanged(target string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d := p.debounce[target]; d != nil {
+		d.Reset()
+	}
 }
 
 func (p *poller) targetStatus(name string) (targetStatus, bool) {

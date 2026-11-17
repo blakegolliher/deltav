@@ -4,9 +4,11 @@ package tui
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -28,14 +30,38 @@ type FleetCounts struct {
 	Pending   int `json:"pending"`
 }
 
+// LimitStatus is a target's per-CNode connection limit and, in enforce
+// mode, the share each Envoy is given.
+type LimitStatus struct {
+	PerCNode        uint32 `json:"per_cnode"`
+	Mode            string `json:"mode"`
+	Share           uint32 `json:"share"`
+	Computed        uint32 `json:"computed"`
+	Envoys          int    `json:"envoys"`
+	MaxVIPsPerCNode int    `json:"max_vips_per_cnode"`
+}
+
+// Usage is one CNode's requests in flight against one target's limit.
+type Usage struct {
+	Target   string `json:"target"`
+	Cluster  string `json:"cluster"`
+	CNode    string `json:"cnode"`
+	InFlight uint64 `json:"in_flight"`
+	PerCNode uint32 `json:"per_cnode"`
+	Mode     string `json:"mode"`
+	Over     bool   `json:"over"`
+}
+
 type Target struct {
-	Name        string    `json:"name"`
-	ListenPort  uint32    `json:"listen_port"`
-	TLS         bool      `json:"tls"`
-	Endpoints   int       `json:"endpoints"`
-	InFlight    uint64    `json:"in_flight"`
-	Stats       Summary   `json:"stats"`
-	RateHistory []float64 `json:"rate_history"`
+	Name        string       `json:"name"`
+	ListenPort  uint32       `json:"listen_port"`
+	TLS         bool         `json:"tls"`
+	Endpoints   int          `json:"endpoints"`
+	InFlight    uint64       `json:"in_flight"`
+	Stats       Summary      `json:"stats"`
+	RateHistory []float64    `json:"rate_history"`
+	Limit       *LimitStatus `json:"limit"`
+	Over        []Usage      `json:"over"`
 }
 
 type Overview struct {
@@ -58,6 +84,8 @@ type CNode struct {
 	State       string    `json:"state"`
 	Enabled     bool      `json:"enabled"`
 	Healthy     bool      `json:"healthy"`
+	Drained     bool      `json:"drained"`
+	Limits      []Usage   `json:"limits"`
 	IsLeader    bool      `json:"is_leader"`
 	IsMgmt      bool      `json:"is_mgmt"`
 	VIPs        int       `json:"vips"`
@@ -96,10 +124,12 @@ type Fleet struct {
 }
 
 type TargetStatus struct {
-	VIPs    int    `json:"vips"`
-	Healthy int    `json:"healthy"`
-	Problem string `json:"problem"`
-	Held    bool   `json:"held"`
+	VIPs    int          `json:"vips"`
+	Healthy int          `json:"healthy"`
+	Drained int          `json:"drained"`
+	Problem string       `json:"problem"`
+	Held    bool         `json:"held"`
+	Limit   *LimitStatus `json:"limit"`
 }
 
 type TargetInfo struct {
@@ -111,6 +141,7 @@ type TargetInfo struct {
 	Pool       string        `json:"pool"`
 	Endpoints  []struct{}    `json:"endpoints"`
 	Status     *TargetStatus `json:"status"`
+	Over       []Usage       `json:"over"`
 }
 
 type Cluster struct {
@@ -220,6 +251,64 @@ func (c *Client) Clusters(ctx context.Context) ([]Cluster, error) {
 		Clusters []Cluster `json:"clusters"`
 	}
 	return out.Clusters, c.get(ctx, "/api/v1/vast", &out)
+}
+
+// send makes a change through the API and returns the daemon's error, if
+// any, in its own words.
+func (c *Client) send(ctx context.Context, method, path string, body any) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rd = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(c.Base, "/")+path, rd)
+	if err != nil {
+		return err
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("cannot reach the daemon at %s: %w", c.Base, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		return nil
+	}
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&e) == nil && e.Error != "" {
+		return fmt.Errorf("%s", e.Error)
+	}
+	return fmt.Errorf("%s %s: status %d", method, path, resp.StatusCode)
+}
+
+// SetLimit sets a target's per-CNode connection limit; 0 removes it.
+func (c *Client) SetLimit(ctx context.Context, target string, perCNode uint32, mode string) error {
+	path := "/api/v1/targets/" + url.PathEscape(target) + "/limit"
+	if perCNode == 0 {
+		return c.send(ctx, http.MethodDelete, path, nil)
+	}
+	return c.send(ctx, http.MethodPut, path, map[string]any{"per_cnode": perCNode, "mode": mode})
+}
+
+// SetDrained drains or undrains a CNode.
+func (c *Client) SetDrained(ctx context.Context, cluster, cnode string, drained bool) error {
+	method := http.MethodDelete
+	if drained {
+		method = http.MethodPost
+	}
+	return c.send(ctx, method, "/api/v1/vast/"+url.PathEscape(cluster)+"/cnodes/"+url.PathEscape(cnode)+"/drain", nil)
 }
 
 // Event is one item from the daemon's event stream: an overview, or the

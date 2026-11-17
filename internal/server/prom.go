@@ -57,6 +57,19 @@ var (
 	descReports = prometheus.NewDesc("deltav_telemetry_load_reports_total",
 		"Load reports ingested.", nil, nil)
 
+	descLimit = prometheus.NewDesc("deltav_target_cnode_limit",
+		"The target's per-CNode connection limit, by mode (alert or enforce).", []string{"target", "mode"}, nil)
+	descShare = prometheus.NewDesc("deltav_target_limit_share",
+		"Enforce mode: connections each Envoy may open to each VIP of the target, as now served.", []string{"target"}, nil)
+	descCNodeInFlight = prometheus.NewDesc("deltav_cnode_in_flight_requests",
+		"Requests the fleet has in flight to the target's VIPs on the CNode. Compare with deltav_target_cnode_limit.",
+		[]string{"target", "cluster", "cnode"}, nil)
+	descCNodeOver = prometheus.NewDesc("deltav_cnode_over_limit",
+		"1 while the CNode's requests in flight for the target exceed the target's limit, else 0.",
+		[]string{"target", "cluster", "cnode"}, nil)
+	descDrained = prometheus.NewDesc("deltav_cnode_drained",
+		"1 for a CNode whose VIPs an operator has withheld from Envoys.", []string{"cluster", "cnode"}, nil)
+
 	descMemberRequests = prometheus.NewDesc("deltav_member_requests_total",
 		"Requests finished by one Envoy, by status class. Only with --metrics-per-member.",
 		[]string{"node", "class"}, nil)
@@ -104,6 +117,26 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 		counter(descLoadIssued, e.Load.Issued, l...)
 		counter(descLoadDone, e.Load.Success, with("success")...)
 		counter(descLoadDone, e.Load.Errors, with("error")...)
+	}
+
+	for _, t := range c.s.store.Targets() {
+		if st, ok := c.s.poller.targetStatus(t.Name); ok && st.Limit != nil {
+			gauge(descLimit, float64(st.Limit.PerCNode), t.Name, st.Limit.Mode)
+			if st.Limit.Mode == "enforce" {
+				gauge(descShare, float64(st.Limit.Share), t.Name)
+			}
+		}
+	}
+	for _, u := range c.s.limitUsage() {
+		gauge(descCNodeInFlight, float64(u.InFlight), u.Target, u.Cluster, u.CNode)
+		over := 0.0
+		if u.Over {
+			over = 1
+		}
+		gauge(descCNodeOver, over, u.Target, u.Cluster, u.CNode)
+	}
+	for _, d := range c.s.store.Drained() {
+		gauge(descDrained, 1, d.Cluster, d.CNode)
 	}
 
 	counts := countFleet(c.s.fleet.List())

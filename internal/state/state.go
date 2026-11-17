@@ -2,9 +2,9 @@
 // it is attached to (with their credentials) and the targets it serves.
 // Everything lives in one JSON file, mode 0600, replaced atomically.
 //
-// A second file caches the endpoints last served for each target, so a
-// restarted daemon can offer Envoys the same config at once, before (or
-// without) reaching VAST.
+// A second file caches what was last served for each target (its endpoints
+// and any enforced share), so a restarted daemon can offer Envoys the same
+// config at once, before (or without) reaching VAST.
 package state
 
 import (
@@ -37,6 +37,24 @@ type TLS struct {
 	Insecure   bool   `json:"insecure,omitempty"`
 }
 
+// Limit modes.
+const (
+	ModeAlert   = "alert"   // report CNodes over the limit; enforce nothing
+	ModeEnforce = "enforce" // also cap each Envoy's connections per VIP
+)
+
+// Limit is a target's per-CNode connection limit.
+type Limit struct {
+	PerCNode uint32 `json:"per_cnode"`
+	Mode     string `json:"mode"`
+}
+
+// Drain names a CNode whose VIPs are withheld from Envoys.
+type Drain struct {
+	Cluster string `json:"cluster"`
+	CNode   string `json:"cnode"`
+}
+
 // Target is what Envoys balance across: one VIP pool of one cluster, a
 // port, and whether upstream TLS is used. It becomes one Envoy cluster and
 // one loopback listener port on every client.
@@ -49,6 +67,7 @@ type Target struct {
 	Port       uint32 `json:"port"`        // the S3 port on the VIPs
 	ListenPort uint32 `json:"listen_port"` // the loopback port on every client
 	TLS        *TLS   `json:"tls,omitempty"`
+	Limit      *Limit `json:"limit,omitempty"` // nil: no limit
 }
 
 // Endpoint is one cached endpoint of a target.
@@ -62,11 +81,12 @@ type file struct {
 	Version  int       `json:"version"`
 	Clusters []Cluster `json:"clusters"`
 	Targets  []Target  `json:"targets"`
+	Drained  []Drain   `json:"drained,omitempty"`
 }
 
 const (
 	stateFile = "state.json"
-	cacheFile = "endpoints.json"
+	cacheFile = "served.json"
 )
 
 // Errors the API maps to HTTP statuses.
@@ -226,9 +246,16 @@ func (s *Store) RemoveCluster(name string) error {
 	if len(kept) == len(old) {
 		return fmt.Errorf("%w: no cluster %q", ErrNotFound, name)
 	}
-	s.data.Clusters = kept
+	oldDrained := s.data.Drained
+	var drained []Drain
+	for _, d := range oldDrained {
+		if d.Cluster != name {
+			drained = append(drained, d)
+		}
+	}
+	s.data.Clusters, s.data.Drained = kept, drained
 	if err := s.save(); err != nil {
-		s.data.Clusters = old
+		s.data.Clusters, s.data.Drained = old, oldDrained
 		return err
 	}
 	return nil
@@ -300,26 +327,119 @@ func (s *Store) RemoveTarget(name string) error {
 	return nil
 }
 
-// LoadEndpoints returns the cached endpoints per target name; an absent or
-// unreadable cache is an empty one.
-func (s *Store) LoadEndpoints() map[string][]Endpoint {
-	out := map[string][]Endpoint{}
-	if s.dir == "" {
-		return out
+// SetTargetLimit sets a target's per-CNode connection limit, or removes it
+// if l is nil or its PerCNode is 0.
+func (s *Store) SetTargetLimit(name string, l *Limit) error {
+	if l != nil && l.PerCNode == 0 {
+		l = nil
 	}
-	b, err := os.ReadFile(filepath.Join(s.dir, cacheFile))
-	if err != nil || json.Unmarshal(b, &out) != nil {
-		return map[string][]Endpoint{}
+	if l != nil && l.Mode != ModeAlert && l.Mode != ModeEnforce {
+		return fmt.Errorf("%w: limit mode %q: want %s or %s", ErrInvalid, l.Mode, ModeAlert, ModeEnforce)
 	}
-	return out
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, t := range s.data.Targets {
+		if t.Name != name {
+			continue
+		}
+		if l != nil {
+			copied := *l
+			l = &copied
+		}
+		// A new slice: Targets() hands out the old one's elements.
+		targets := append([]Target(nil), s.data.Targets...)
+		targets[i].Limit = l
+		prev := s.data.Targets
+		s.data.Targets = targets
+		if err := s.save(); err != nil {
+			s.data.Targets = prev
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: no target %q", ErrNotFound, name)
 }
 
-// SaveEndpoints replaces the endpoint cache.
-func (s *Store) SaveEndpoints(eps map[string][]Endpoint) error {
+// Drained returns the drained CNodes.
+func (s *Store) Drained() []Drain {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Drain(nil), s.data.Drained...)
+}
+
+// SetDrained drains or undrains a CNode of an attached cluster. Draining
+// one already drained is not an error; undraining one that is not is.
+func (s *Store) SetDrained(cluster, cnode string, drained bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := false
+	for _, c := range s.data.Clusters {
+		found = found || c.Name == cluster
+	}
+	if !found {
+		return fmt.Errorf("%w: no cluster %q", ErrNotFound, cluster)
+	}
+	old := s.data.Drained
+	var next []Drain
+	was := false
+	for _, d := range old {
+		if d.Cluster == cluster && d.CNode == cnode {
+			was = true
+			continue
+		}
+		next = append(next, d)
+	}
+	switch {
+	case drained:
+		next = append(next, Drain{Cluster: cluster, CNode: cnode})
+		sort.Slice(next, func(i, j int) bool {
+			if next[i].Cluster != next[j].Cluster {
+				return next[i].Cluster < next[j].Cluster
+			}
+			return next[i].CNode < next[j].CNode
+		})
+	case !was:
+		return fmt.Errorf("%w: CNode %q of cluster %q is not drained", ErrNotFound, cnode, cluster)
+	}
+	s.data.Drained = next
+	if err := s.save(); err != nil {
+		s.data.Drained = old
+		return err
+	}
+	return nil
+}
+
+// Cache is what a restarted daemon needs in order to serve Envoys exactly
+// what they were being served: each target's endpoints and, for a target
+// with an enforced limit, the per-Envoy share.
+type Cache struct {
+	Endpoints map[string][]Endpoint `json:"endpoints"`
+	Shares    map[string]uint32     `json:"shares,omitempty"`
+}
+
+// LoadCache returns the cache; an absent or unreadable one is empty.
+func (s *Store) LoadCache() Cache {
+	c := Cache{}
+	if s.dir != "" {
+		if b, err := os.ReadFile(filepath.Join(s.dir, cacheFile)); err == nil && json.Unmarshal(b, &c) != nil {
+			c = Cache{}
+		}
+	}
+	if c.Endpoints == nil {
+		c.Endpoints = map[string][]Endpoint{}
+	}
+	if c.Shares == nil {
+		c.Shares = map[string]uint32{}
+	}
+	return c
+}
+
+// SaveCache replaces the cache.
+func (s *Store) SaveCache(c Cache) error {
 	if s.dir == "" {
 		return nil
 	}
-	b, err := json.MarshalIndent(eps, "", "  ")
+	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}

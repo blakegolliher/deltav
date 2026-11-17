@@ -208,7 +208,7 @@ func (s *Server) handleTargetAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "cluster %q has not been read yet; try again shortly", in.Cluster)
 		return
 	}
-	if _, st := resolve(in, view); st.Problem != "" {
+	if _, st := resolve(in, view, nil); st.Problem != "" {
 		writeError(w, http.StatusBadRequest, "%s", st.Problem)
 		return
 	}
@@ -261,7 +261,10 @@ type cnodeJSON struct {
 	Enabled      bool   `json:"enabled"`
 	// Healthy is Delta-V's verdict: enabled and ACTIVE. The VIPs of a CNode
 	// that is not healthy are not served to Envoys.
-	Healthy  bool `json:"healthy"`
+	Healthy bool `json:"healthy"`
+	// Drained is true when an operator has withheld this CNode's VIPs from
+	// Envoys. It says nothing about the CNode's health.
+	Drained  bool `json:"drained"`
 	IsLeader bool `json:"is_leader"`
 	IsMgmt   bool `json:"is_mgmt"`
 	// VIPs counts the VIPs this CNode hosts in the pools of configured
@@ -273,6 +276,9 @@ type cnodeJSON struct {
 	// complete 10-second slots, oldest first, for a sparkline.
 	RateHistory []float64       `json:"rate_history"`
 	Endpoints   []endpointStats `json:"endpoints"` // one row per VIP and target
+	// Limits holds, for each target with a limit that has VIPs here, this
+	// CNode's requests in flight against that limit.
+	Limits []cnodeUsage `json:"limits"`
 }
 
 type cnodesResponse struct {
@@ -324,6 +330,15 @@ func (s *Server) handleCNodes(w http.ResponseWriter, r *http.Request) {
 
 	resp := cnodesResponse{Window: win.String(), CNodes: []cnodeJSON{}}
 	idle := s.agg.Idle(win)
+	drained := map[cnodeKey]bool{}
+	for _, d := range s.store.Drained() {
+		drained[cnodeKey{d.Cluster, d.CNode}] = true
+	}
+	limits := map[cnodeKey][]cnodeUsage{}
+	for _, u := range s.limitUsage() {
+		ck := cnodeKey{u.Cluster, u.CNode}
+		limits[ck] = append(limits[ck], u)
+	}
 	for _, c := range s.store.Clusters() {
 		v := s.poller.view(c.Name)
 		if v == nil {
@@ -351,8 +366,11 @@ func (s *Server) handleCNodes(w http.ResponseWriter, r *http.Request) {
 			ck := cnodeKey{c.Name, n.Name}
 			cj := cnodeJSON{
 				Cluster: c.Name, Name: n.Name, Hostname: n.Hostname, State: n.State, DisplayState: n.DisplayState,
-				Enabled: n.Enabled, Healthy: n.Healthy(), IsLeader: n.IsLeader, IsMgmt: n.IsMgmt,
-				VIPs: hosted[n.Name], Stats: idle, Endpoints: rows[ck],
+				Enabled: n.Enabled, Healthy: n.Healthy(), Drained: drained[ck], IsLeader: n.IsLeader, IsMgmt: n.IsMgmt,
+				VIPs: hosted[n.Name], Stats: idle, Endpoints: rows[ck], Limits: limits[ck],
+			}
+			if cj.Limits == nil {
+				cj.Limits = []cnodeUsage{}
 			}
 			if cj.Endpoints == nil {
 				cj.Endpoints = []endpointStats{}

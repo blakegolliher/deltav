@@ -80,15 +80,78 @@ func (m *Model) footer() []string {
 		keys = "enter show VIPs  │  " + keys
 	case tabFleet:
 		keys = "/ filter  x clear  s sort  o order  a state  c connected  pgup/pgdn page  │  " + keys
+	case tabControls:
+		keys = "e set limit  m alert/enforce  d drain/undrain  │  " + keys
 	}
 	if m.filtering {
 		keys = "type to filter by node ID, address or version  │  enter apply  esc cancel"
 	}
-	errLine := ""
-	if m.errText != "" {
-		errLine = styleBad.Render("! " + m.errText)
+	last := styleDim.Render(keys)
+	// A question takes the place of the key hints until it is answered.
+	switch {
+	case m.editing != nil:
+		last = styleHead.Render(fmt.Sprintf("Connections per CNode for %s, 0 for no limit: %s█", m.editing.target, m.editing.draft)) +
+			styleDim.Render("   enter apply  esc cancel")
+	case m.confirm != nil && m.confirm.drain:
+		last = styleHead.Render(fmt.Sprintf("Drain %s? Its VIPs leave every Envoy at once; requests in flight finish.", m.confirm.cnode)) +
+			styleDim.Render("   y drain  any other key cancel")
+	case m.confirm != nil:
+		last = styleHead.Render(fmt.Sprintf("Undrain %s? Its VIPs are served to every Envoy again.", m.confirm.cnode)) +
+			styleDim.Render("   y undrain  any other key cancel")
 	}
-	return []string{errLine, styleDim.Render(keys)}
+	status := ""
+	switch {
+	case m.errText != "":
+		status = styleBad.Render("! " + m.errText)
+	case m.notice != "" && m.tab == tabControls:
+		status = styleGood.Render("✓ " + m.notice)
+	}
+	return []string{status, last}
+}
+
+// limitCell is a target's limit for a table: "-", "100 alert", "100 enforce".
+func limitCell(l *LimitStatus, over []Usage) string {
+	if l == nil {
+		return styleDim.Render("-")
+	}
+	cell := fmt.Sprintf("%d %s", l.PerCNode, l.Mode)
+	if len(over) > 0 {
+		return styleBad.Render(cell + " OVER")
+	}
+	return cell
+}
+
+// usageCell is a CNode's requests in flight against the limits that apply
+// to it: "6/5" for one target, "s3 6/5, logs 1/9" for several.
+func usageCell(limits []Usage) string {
+	if len(limits) == 0 {
+		return styleDim.Render("-")
+	}
+	var parts []string
+	for _, u := range limits {
+		part := fmt.Sprintf("%d/%d", u.InFlight, u.PerCNode)
+		if len(limits) > 1 {
+			part = u.Target + " " + part
+		}
+		if u.Over {
+			part = styleBad.Render(part + " OVER")
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// cnodeState is a CNode's state for a table.
+func cnodeState(c CNode) string {
+	switch {
+	case !c.Enabled:
+		return styleBad.Render(c.State + " disabled")
+	case !c.Healthy:
+		return styleBad.Render(c.State)
+	case c.Drained:
+		return styleWarn.Render(c.State + " drained")
+	}
+	return styleGood.Render(c.State)
 }
 
 // body returns the current view's lines and the index of the line holding
@@ -150,8 +213,9 @@ func (m *Model) overviewView() ([]string, int) {
 			styleDim.Render("  deltav target add NAME --cluster NAME --pool POOL --port 80 --listen-port 9000")), -1
 	}
 	cols := append([]column{{"TARGET", false}, {"LISTEN", false}, {"ENDPOINTS", true}}, statColumns...)
-	cols = append(cols, column{"LAST 5 MIN", false})
+	cols = append(cols, column{"LIMIT", false}, column{"LAST 5 MIN", false})
 	var rows [][]string
+	breached := false
 	for _, t := range m.overview.Targets {
 		endpoints := fmt.Sprint(t.Endpoints)
 		if t.Endpoints == 0 {
@@ -159,7 +223,15 @@ func (m *Model) overviewView() ([]string, int) {
 		}
 		row := []string{t.Name, fmt.Sprintf("127.0.0.1:%d", t.ListenPort), endpoints}
 		row = append(row, statCells(t.InFlight, t.Stats)...)
-		rows = append(rows, append(row, sparkline(t.RateHistory, 29)))
+		rows = append(rows, append(row, limitCell(t.Limit, t.Over), sparkline(t.RateHistory, 29)))
+		// Limit breaches lead: they are what an operator opens this for.
+		for _, o := range t.Over {
+			out = append(out, styleBad.Render(fmt.Sprintf("Over the limit: %s on %s has %d in flight, limit %d", t.Name, o.CNode, o.InFlight, o.PerCNode)))
+			breached = true
+		}
+	}
+	if breached {
+		out = append(out, "")
 	}
 	out = append(out, table(cols, rows, m.cursor[tabOverview], m.width)...)
 	return out, len(out) - len(rows) + m.cursor[tabOverview]
@@ -179,7 +251,7 @@ func (m *Model) cnodesView() ([]string, int) {
 		clusters[c.Cluster] = true
 	}
 	cols := append([]column{{"CNODE", false}, {"STATE", false}, {"VIPS", true}}, statColumns...)
-	cols = append(cols, column{"LAST 5 MIN", false})
+	cols = append(cols, column{"OF LIMIT", false}, column{"LAST 5 MIN", false})
 	var rows [][]string
 	selected := -1
 	for i, c := range m.cnodes.CNodes {
@@ -193,18 +265,11 @@ func (m *Model) cnodesView() ([]string, int) {
 		if c.IsMgmt {
 			name += styleDim.Render(" mgmt")
 		}
-		state := styleGood.Render(c.State)
-		switch {
-		case !c.Enabled:
-			state = styleBad.Render(c.State + " disabled")
-		case !c.Healthy:
-			state = styleBad.Render(c.State)
-		}
 		if i == m.cursor[tabCNodes] {
 			selected = len(rows)
 		}
-		row := append([]string{name, state, fmt.Sprint(c.VIPs)}, statCells(c.InFlight, c.Stats)...)
-		rows = append(rows, append(row, sparkline(c.RateHistory, 29)))
+		row := append([]string{name, cnodeState(c), fmt.Sprint(c.VIPs)}, statCells(c.InFlight, c.Stats)...)
+		rows = append(rows, append(row, usageCell(c.Limits), sparkline(c.RateHistory, 29)))
 		if m.expanded[c.Cluster+"/"+c.Name] {
 			for j, v := range c.Endpoints {
 				branch := "├ "
@@ -311,6 +376,7 @@ func (m *Model) controlsView() ([]string, int) {
 	}
 	out = append(out, "", styleHead.Render("Targets"))
 	focus := -1
+	cur := m.cursor[tabControls]
 	if len(m.targets) == 0 {
 		out = append(out, styleDim.Render("  none"))
 	} else {
@@ -324,6 +390,7 @@ func (m *Model) controlsView() ([]string, int) {
 			if t.TLS {
 				tls = "yes"
 			}
+			limit := styleDim.Render("-")
 			status := styleDim.Render("fixed endpoint list")
 			if st := t.Status; st != nil {
 				switch {
@@ -333,21 +400,57 @@ func (m *Model) controlsView() ([]string, int) {
 					status = styleBad.Render(st.Problem)
 				case st.Held:
 					status = styleWarn.Render("serving the last known endpoints: the pool resolved to none")
-				case st.Healthy < st.VIPs:
-					status = styleWarn.Render(fmt.Sprintf("%d of %d VIPs on healthy CNodes", st.Healthy, st.VIPs))
+				case st.Healthy < st.VIPs || st.Drained > 0:
+					status = fmt.Sprintf("%d of %d VIPs on healthy CNodes", st.Healthy, st.VIPs)
+					if st.Drained > 0 {
+						status += fmt.Sprintf(", %d withheld by drain", st.Drained)
+					}
+					status = styleWarn.Render(status)
 				default:
 					status = styleGood.Render(fmt.Sprintf("%d of %d VIPs on healthy CNodes", st.Healthy, st.VIPs))
 				}
+				if l := st.Limit; l != nil {
+					limit = limitCell(l, t.Over)
+					if l.Mode == "enforce" {
+						limit += fmt.Sprintf(": %d per Envoy per VIP", l.Share)
+						if l.Computed != l.Share {
+							limit += styleDim.Render(fmt.Sprintf(" (%d held back)", l.Computed))
+						}
+					}
+				}
 			}
-			rows = append(rows, []string{t.Name, fmt.Sprintf("127.0.0.1:%d", t.ListenPort), from, tls, fmt.Sprint(len(t.Endpoints)), status})
+			rows = append(rows, []string{t.Name, fmt.Sprintf("127.0.0.1:%d", t.ListenPort), from, tls, fmt.Sprint(len(t.Endpoints)), limit, status})
 		}
-		lines := table([]column{{"NAME", false}, {"LISTEN", false}, {"FROM", false}, {"TLS", false}, {"ENDPOINTS", true}, {"STATUS", false}},
-			rows, m.cursor[tabControls], m.width)
-		focus = len(out) + 1 + m.cursor[tabControls]
-		out = append(out, lines...)
+		selected := -1
+		if cur < len(m.targets) {
+			selected = cur
+			focus = len(out) + 1 + cur
+		}
+		out = append(out, table([]column{{"NAME", false}, {"LISTEN", false}, {"FROM", false}, {"TLS", false}, {"ENDPOINTS", true},
+			{"LIMIT", false}, {"STATUS", false}}, rows, selected, m.width)...)
+	}
+	out = append(out, "", styleHead.Render("CNodes"))
+	if len(m.control) == 0 {
+		out = append(out, styleDim.Render("  none: no VAST cluster is attached"))
+	} else {
+		var rows [][]string
+		for _, c := range m.control {
+			rows = append(rows, []string{c.Cluster + " / " + c.Name, cnodeState(c), fmt.Sprint(c.VIPs), fmt.Sprint(c.InFlight), usageCell(c.Limits)})
+		}
+		selected := -1
+		if i := cur - len(m.targets); i >= 0 && i < len(m.control) {
+			selected = i
+			focus = len(out) + 1 + i
+		}
+		out = append(out, table([]column{{"CNODE", false}, {"STATE", false}, {"VIPS", true}, {"IN FLIGHT", true}, {"OF LIMIT", false}},
+			rows, selected, m.width)...)
 	}
 	out = append(out, "",
-		styleDim.Render("Add and remove clusters and targets with \"deltav vast\" and \"deltav target\"."),
-		styleDim.Render("Per-CNode connection limits and CNode drain are not built yet."))
+		styleDim.Render("A limit is the connections (requests in flight) the fleet should hold to any one CNode for a target."),
+		styleDim.Render("alert reports CNodes over it. enforce also caps every Envoy, at limit ÷ (connected Envoys × most VIPs on"),
+		styleDim.Render("one CNode), never below 1. The cap is each Envoy's own, so the fleet total is approximate; and changing"),
+		styleDim.Render("it makes Envoys reconnect, so as Envoys come and go a new cap is held back until it differs enough."),
+		styleDim.Render("Drain withholds a CNode's VIPs from every Envoy until it is undrained. Nothing changes on the VAST cluster."),
+		styleDim.Render("Clusters and targets are added and removed with \"deltav vast\" and \"deltav target\"."))
 	return out, focus
 }

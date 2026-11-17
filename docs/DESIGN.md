@@ -186,6 +186,33 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     in each of the last 29 complete slots, per target and per CNode, in the overview and CNode
     responses (`rate_history`).
 
+### Milestone 7: limits and drain
+
+29. **Over the limit is reported in both modes.** For each target with a limit the daemon adds up
+    the fleet's requests in flight to that target's VIPs on each CNode and compares the sum with
+    the limit. Alert mode stops there. Enforce mode reports too, because its share cannot go
+    below 1 and the fleet can then exceed the limit (amendment 1). An Envoy's first load-report
+    interval for a target is missing from the sums (amendment 20).
+30. **The enforced share, as built.** `limit.Share` is amendment 1's formula with N the Envoys
+    connected now and *k_max* taken over the endpoints being served. A recomputed share is pushed
+    only if it differs from the one in force by more than a fifth and at least a minute after the
+    last push; turning enforcement on or off, and any change an operator makes to the limit, is
+    pushed at once. The API shows both the share in force and the one computed, so a held-back
+    change is visible. While a fleet is being rolled out the share therefore lags by up to the
+    interval; alerting covers that.
+31. **A restart keeps the share.** The first snapshot after a restart is built before any Envoy
+    has connected. Worked out afresh it would be the whole limit per Envoy, loosening every limit
+    until the fleet was back and the interval had passed. The share in force is cached with the
+    endpoints (amendment 24) and restored, and the debounce interval starts again at startup.
+32. **Drain is immediate, and local.** A drained CNode's VIPs are left out of every target of its
+    cluster. If that empties a target it does so at once: the three-poll hold of amendment 23 is
+    for odd answers from VAST, not for an operator's decision. Nothing is changed on VAST, and the
+    name must be a CNode the cluster has, so a typo cannot sit in the state doing nothing.
+33. **Still to be seen against real Envoy** (the tests exist and have not been run): that the cap
+    holds each VIP to its share and makes excess requests wait, not fail; that removing the cap
+    under load, which rebuilds Envoy's cluster (amendment 12), fails nothing; and that draining
+    under load fails nothing.
+
 ## Known gaps (POC)
 
 mTLS on the xDS and telemetry streams; daemon HA; per-group targeting of Envoys; long-term metric

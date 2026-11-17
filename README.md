@@ -5,9 +5,8 @@ the VIPs of one or more VAST clusters, with no proxy machines in the data path. 
 endpoints over xDS, collects telemetry from every Envoy over the streams Envoy opens, and shows
 what the fleet and the CNodes are doing.
 
-**Status: proof of concept; milestones 1 to 4 and 6 of 8 are done.** Still to come, in this
-order: per-CNode connection limits and CNode drain (7), the web UI (5), and packaging with a
-quick start (8). The daemon reads healthy endpoints from VAST clusters (or takes a static list),
+**Status: proof of concept; milestones 1 to 4, 6 and 7 of 8 are done.** Still to come: the web
+UI (5), then packaging with a quick start (8). The daemon reads healthy endpoints from VAST clusters (or takes a static list),
 serves them to Envoy over xDS and tracks every connected Envoy; it ingests Envoy's access logs and
 load reports and keeps rolling per-endpoint, per-CNode and per-Envoy stats, served by the
 `/api/v1` endpoints below and `/metrics`; the CLI and a terminal UI read that API; `deltav bootstrap` prints the client
@@ -53,6 +52,36 @@ but GETs and the token call. If VAST is unreachable, or the daemon restarts, Env
 served the last known endpoints. TLS verification of the VAST API is on unless the cluster is
 added with `--insecure`.
 
+## Limits and drain
+
+```sh
+deltav limit set s3 --per-cnode 400                  # alert: report CNodes over 400 connections
+deltav limit set s3 --per-cnode 400 --mode enforce   # also cap every Envoy
+deltav limit set s3 --per-cnode 0                    # remove the limit
+deltav node drain cnode-3-11                         # withhold a CNode's VIPs from every Envoy
+deltav node undrain cnode-3-11
+```
+
+A limit is the number of connections the whole fleet should hold to any one CNode for a target.
+"Connections" are requests in flight, which is what Envoy reports: S3 over HTTP/1.1 holds one
+request per connection, and idle keep-alive connections are not counted.
+
+- **alert** (the default) reports CNodes over the limit in the API, the TUI and `/metrics`
+  (`deltav_cnode_over_limit`). Nothing is enforced.
+- **enforce** also gives each Envoy a cap on its connections to each VIP. Two things to know.
+  The cap is each Envoy's own, so the limit is divided by the number of connected Envoys and by
+  the most VIPs of the target that one CNode hosts, rounded down but never below 1: CNodes
+  hosting fewer VIPs get less than the limit, and once Envoys times VIPs exceeds the limit the
+  fleet can exceed it (alerting still reports that). At its cap an Envoy makes requests for that
+  VIP wait; it does not send them elsewhere. And changing the cap makes every Envoy reconnect its
+  connections for the target, so as Envoys come and go a new cap is pushed only when it differs
+  by more than a fifth and not within a minute of the last (`serve --limit-min-change`,
+  `--limit-min-interval`). A change you make yourself is pushed at once.
+
+Drain is Delta-V's own setting: nothing changes on the VAST cluster. Envoys stop sending a
+drained CNode new requests at once, and requests in flight finish. Limits and drains survive a
+daemon restart.
+
 ## Watch it
 
 ```sh
@@ -67,7 +96,8 @@ endpoints, requests in flight, request and byte rates, 403s and 503s, latency, a
 sparkline), **CNodes** (the same per CNode; `enter` shows its VIPs), **Fleet** (every Envoy; `/`
 filters, `s` sorts, `a` and `c` narrow by config state and connection, `pgup`/`pgdn` page; the
 daemon does the paging, so it stays quick with thousands of Envoys) and **Controls** (attached
-clusters and targets). `w` cycles the window between 1m, 5m and 1h; `q` quits. It follows the
+clusters, targets and CNodes; `e` sets a target's limit, `m` switches it between alert and
+enforce, `d` drains or undrains a CNode). `w` cycles the window between 1m, 5m and 1h; `q` quits. It follows the
 daemon's event stream and uses the terminal's own colors, so it suits light and dark themes.
 
 All three take `--api` (default `http://127.0.0.1:18080`, or `DELTAV_API`) and, for a daemon
@@ -106,7 +136,9 @@ is required when it is bound elsewhere). Stats take `?window=1m|5m|1h`.
 | `/api/v1/overview` | Per target: endpoints served, requests in flight, request and byte rates, status counts with 403 and 503 broken out, p50/p90/p99. Fleet counts. |
 | `/api/v1/targets` | The targets and endpoints being served to Envoys, and how each VAST target resolved. `POST` adds one, `DELETE /api/v1/targets/{name}` removes it. |
 | `/api/v1/vast` | Attached VAST clusters and the state of their polling. `POST` attaches one (the password is never returned), `DELETE /api/v1/vast/{name}` detaches it; `/api/v1/vast/{name}/pools` lists its VIP pools. |
-| `/api/v1/cnodes` | Per CNode: state from VAST, VIPs hosted, requests in flight and the same stats, with a row per VIP beneath. |
+| `/api/v1/cnodes` | Per CNode: state from VAST, whether it is drained, VIPs hosted, requests in flight against each target's limit, and the same stats, with a row per VIP beneath. |
+| `/api/v1/targets/{name}/limit` | `PUT` sets a target's per-CNode limit and mode; `DELETE` removes it. |
+| `/api/v1/vast/{cluster}/cnodes/{cnode}/drain` | `POST` drains a CNode; `DELETE` undrains it. |
 | `/api/v1/endpoints` | The same stats per endpoint (VIP); `?target=` narrows it. |
 | `/api/v1/fleet` | Envoys with version, last seen, config state and stats. `?limit=&offset=`, `?sort=node_id\|request_rate\|last_seen\|connected_at\|envoy_version\|config_state\|address`, `?order=asc\|desc`, `?q=` (substring), `?state=acked\|nacked\|pending`, `?connected=true\|false`. |
 | `/api/v1/fleet/{node}` | One Envoy, every window. |
@@ -122,7 +154,10 @@ keep-alive connections are not included.
 `deltav_endpoint_request_duration_seconds` (histogram), `deltav_endpoint_in_flight_requests`,
 `deltav_endpoint_overflow_total`, `deltav_endpoint_load_issued_total`,
 `deltav_endpoint_load_completed_total{...,result}`, `deltav_fleet_members{state}`,
-`deltav_fleet_config{state}` and `deltav_target_endpoints{target}`. Per-Envoy series
+`deltav_fleet_config{state}`, `deltav_target_endpoints{target}`, and for limits and drain
+`deltav_target_cnode_limit{target,mode}`, `deltav_target_limit_share{target}`,
+`deltav_cnode_in_flight_requests{target,cluster,cnode}`, `deltav_cnode_over_limit{...}` and
+`deltav_cnode_drained{cluster,cnode}`. Per-Envoy series
 (`deltav_member_*`) are off unless the daemon runs with `--metrics-per-member`.
 
 ## S3 clients

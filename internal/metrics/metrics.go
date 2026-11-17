@@ -410,6 +410,18 @@ func (a *Aggregator) dropLoad(node string) {
 	delete(a.load, node)
 }
 
+// InFlight returns the fleet's requests in flight per endpoint, from the
+// latest load reports. Endpoints with none are absent.
+func (a *Aggregator) InFlight() map[EndpointKey]uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make(map[EndpointKey]uint64, len(a.inflight))
+	for k, v := range a.inflight {
+		out[k] = v
+	}
+	return out
+}
+
 // EndpointStats is one endpoint's view over a window.
 type EndpointStats struct {
 	Key      EndpointKey

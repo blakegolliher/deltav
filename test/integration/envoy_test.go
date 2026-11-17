@@ -852,3 +852,211 @@ func TestVASTTargetThroughEnvoy(t *testing.T) {
 		t.Errorf("%d requests other than GET and the token call reached the VAST API", mock.Mutating())
 	}
 }
+
+func sendAPI(t *testing.T, s *server.Server, method, path string, body any) {
+	t.Helper()
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rd = strings.NewReader(string(b))
+	}
+	req, err := http.NewRequest(method, "http://"+s.HTTPAddr()+path, rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		msg, _ := io.ReadAll(resp.Body)
+		t.Fatalf("%s %s: status %d: %s", method, path, resp.StatusCode, msg)
+	}
+}
+
+// vastTarget starts n fake backends with the given config behind a mock
+// VAST's pool "main", a daemon with that pool as the target "main", and one
+// Envoy, and waits until the listener answers. It returns the daemon, the
+// mock, the backends, the CNode behind each backend, and the listener port.
+func vastTarget(t *testing.T, cfg lab.FakeS3Config) (*server.Server, *vasttest.Server, []*lab.FakeS3, []string, uint32) {
+	t.Helper()
+	cfgs := make([]lab.FakeS3Config, 6)
+	for i := range cfgs {
+		cfgs[i] = cfg
+	}
+	eps, fakes := backendsWith(t, cfgs...)
+	mock, err := vasttest.New(filepath.Join("..", "..", "testdata", "vast", "v5.5.3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mock.Close)
+	ips := make([]string, len(eps))
+	for i, e := range eps {
+		ips[i] = e.IP
+		if e.Port != eps[0].Port {
+			t.Skip("the backends could not share one port on this host (no 127.0.0.11-16); a VIP pool has one port")
+		}
+	}
+	if err := mock.SetPoolVIPs("main", ips); err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t)
+	s := daemon(t)
+	postAPI(t, s, "/api/v1/vast", map[string]any{
+		"name": "lab", "host": mock.Host(), "user": vasttest.User, "password": vasttest.Password, "insecure": true,
+	})
+	postAPI(t, s, "/api/v1/targets", map[string]any{
+		"name": "main", "cluster": "lab", "pool": "main", "port": eps[0].Port, "listen_port": port,
+	})
+	envoy(t, s, "it-envoy-1")
+	waitMember(t, s, "it-envoy-1", "connected and in sync", inSync)
+	waitListener(t, port)
+	return s, mock, fakes, mock.PoolCNodes("main"), port
+}
+
+// over returns the CNodes the API reports over the target's limit now.
+func over(t *testing.T, s *server.Server) []string {
+	t.Helper()
+	targets := getAPI[struct {
+		Targets []struct {
+			Over []struct {
+				CNode    string `json:"cnode"`
+				InFlight uint64 `json:"in_flight"`
+			} `json:"over"`
+		} `json:"targets"`
+	}](t, s, "/api/v1/targets").Targets
+	var out []string
+	for _, o := range targets[0].Over {
+		out = append(out, fmt.Sprintf("%s (%d)", o.CNode, o.InFlight))
+	}
+	return out
+}
+
+// Milestone 7, enforce mode: the per-Envoy cap really holds each backend to
+// its share; excess requests wait and are not failed; taking the cap away
+// under load (which rebuilds Envoy's cluster) fails nothing; and with no
+// cap the same load goes over the limit, which alert mode reports.
+func TestLimitEnforceThroughEnvoy(t *testing.T) {
+	// Slow backends, so that requests pile up.
+	s, _, fakes, _, port := vastTarget(t, lab.FakeS3Config{Latency: 100 * time.Millisecond})
+
+	// One Envoy, two VIPs per CNode, limit 6: each VIP may have 3 at once.
+	sendAPI(t, s, http.MethodPut, "/api/v1/targets/main/limit", map[string]any{"per_cnode": 6, "mode": "enforce"})
+	waitMember(t, s, "it-envoy-1", "in sync with the limit", inSync)
+	time.Sleep(2500 * time.Millisecond) // let load reporting pick up the rebuilt cluster (DESIGN.md, amendment 20)
+	for _, f := range fakes {
+		f.ResetMaxInFlight()
+	}
+
+	// 48 workers against a fleet-wide allowance of 18.
+	done := make(chan *lab.LoadResult, 1)
+	go func() {
+		done <- load(t, port, func(c *lab.LoadConfig) { c.Requests, c.Duration, c.Concurrency, c.Size = 0, 5*time.Second, 48, 4096 })
+	}()
+	var res *lab.LoadResult
+	var seenOver []string
+	for res == nil {
+		select {
+		case res = <-done:
+		case <-time.After(300 * time.Millisecond):
+			seenOver = append(seenOver, over(t, s)...)
+		}
+	}
+	requireClean(t, res)
+	for i, f := range fakes {
+		if got := f.Stats().MaxInFlight; got > 3 || got == 0 {
+			t.Errorf("backend %d had up to %d requests at once; the cap is 3 per VIP", i, got)
+		}
+	}
+	if len(seenOver) > 0 {
+		t.Errorf("the API reported CNodes over the limit while it was enforced: %v", seenOver)
+	}
+	t.Logf("enforced: %d requests, p50 %.0f ms, p99 %.0f ms; most at once per backend: %v", res.Requests, res.Latency.P50, res.Latency.P99,
+		func() []int64 {
+			out := make([]int64, len(fakes))
+			for i, f := range fakes {
+				out[i] = f.Stats().MaxInFlight
+			}
+			return out
+		}())
+
+	// The same load again; a second in, the limit goes back to alert. That
+	// removes the cap, which makes Envoy rebuild the cluster and its pools
+	// while requests are in flight. None may fail.
+	go func() {
+		done <- load(t, port, func(c *lab.LoadConfig) { c.Requests, c.Duration, c.Concurrency, c.Size = 0, 6*time.Second, 48, 4096 })
+	}()
+	time.Sleep(time.Second)
+	sendAPI(t, s, http.MethodPut, "/api/v1/targets/main/limit", map[string]any{"per_cnode": 6, "mode": "alert"})
+	waitMember(t, s, "it-envoy-1", "in sync without the cap", inSync)
+	for _, f := range fakes {
+		f.ResetMaxInFlight()
+	}
+	res, seenOver = nil, nil
+	for res == nil {
+		select {
+		case res = <-done:
+		case <-time.After(300 * time.Millisecond):
+			seenOver = append(seenOver, over(t, s)...)
+		}
+	}
+	requireClean(t, res)
+	uncapped := false
+	for _, f := range fakes {
+		uncapped = uncapped || f.Stats().MaxInFlight > 3
+	}
+	if !uncapped {
+		t.Error("with the cap removed no backend had more than 3 requests at once: was it really removed?")
+	}
+	if len(seenOver) == 0 {
+		t.Error("48 workers against a limit of 6 per CNode, unenforced, and the API never reported a CNode over the limit")
+	} else {
+		t.Logf("alert mode reported, for example: %s", seenOver[0])
+	}
+}
+
+// Milestone 7, drain: under load, a drained CNode's VIPs stop receiving
+// requests and nothing fails; undrained, they are used again.
+func TestDrainThroughEnvoy(t *testing.T) {
+	s, _, fakes, cnodeOf, port := vastTarget(t, lab.FakeS3Config{Latency: 20 * time.Millisecond})
+	const victim = "cnode-3-11"
+
+	done := make(chan *lab.LoadResult, 1)
+	go func() {
+		done <- load(t, port, func(c *lab.LoadConfig) { c.Requests, c.Duration, c.Concurrency, c.Size = 0, 6*time.Second, 16, 4096 })
+	}()
+	time.Sleep(time.Second)
+	sendAPI(t, s, http.MethodPost, "/api/v1/vast/lab/cnodes/"+victim+"/drain", nil)
+	waitMember(t, s, "it-envoy-1", "in sync after the drain", inSync)
+	time.Sleep(500 * time.Millisecond) // requests already on their way to the drained VIPs finish
+	atDrain := make([]int64, len(fakes))
+	for i, f := range fakes {
+		atDrain[i] = f.Stats().Requests
+	}
+	time.Sleep(2 * time.Second)
+	for i, f := range fakes {
+		got := f.Stats().Requests - atDrain[i]
+		if cnodeOf[i] == victim && got != 0 {
+			t.Errorf("a VIP of the drained %s received %d more requests", victim, got)
+		}
+		if cnodeOf[i] != victim && got == 0 {
+			t.Errorf("a VIP of %s received nothing while %s was drained", cnodeOf[i], victim)
+		}
+	}
+	sendAPI(t, s, http.MethodDelete, "/api/v1/vast/lab/cnodes/"+victim+"/drain", nil)
+	waitMember(t, s, "it-envoy-1", "in sync after the undrain", inSync)
+	atUndrain := make([]int64, len(fakes))
+	for i, f := range fakes {
+		atUndrain[i] = f.Stats().Requests
+	}
+	requireClean(t, <-done) // drained and undrained under load: every request succeeded
+	for i, f := range fakes {
+		if cnodeOf[i] == victim && f.Stats().Requests == atUndrain[i] {
+			t.Errorf("a VIP of %s received nothing after it was undrained", victim)
+		}
+	}
+}

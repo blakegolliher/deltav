@@ -59,6 +59,9 @@ type FakeStats struct {
 	SigFailures int64 `json:"signature_failures"`
 	BytesIn     int64 `json:"bytes_in"`
 	BytesOut    int64 `json:"bytes_out"`
+	// MaxInFlight is the most requests the backend has had in hand at
+	// once, since it started or since ResetMaxInFlight.
+	MaxInFlight int64 `json:"max_in_flight"`
 }
 
 // FakeS3 is a stateless stand-in for an S3 endpoint. PUT reads and hashes
@@ -68,6 +71,7 @@ type FakeS3 struct {
 	cfg FakeS3Config
 
 	requests, injected403, injected503, sigFailures, bytesIn, bytesOut atomic.Int64
+	inFlight, maxInFlight                                              atomic.Int64
 }
 
 // NewFakeS3 returns a backend with defaults applied.
@@ -86,8 +90,13 @@ func (f *FakeS3) Stats() FakeStats {
 	return FakeStats{
 		Requests: f.requests.Load(), Injected403: f.injected403.Load(), Injected503: f.injected503.Load(),
 		SigFailures: f.sigFailures.Load(), BytesIn: f.bytesIn.Load(), BytesOut: f.bytesOut.Load(),
+		MaxInFlight: f.maxInFlight.Load(),
 	}
 }
+
+// ResetMaxInFlight starts the high-water mark of concurrent requests again
+// from what is in hand now.
+func (f *FakeS3) ResetMaxInFlight() { f.maxInFlight.Store(f.inFlight.Load()) }
 
 // Serve runs the backend on ln until ctx ends. It deliberately uses no
 // ServeMux, which would redirect paths containing "//" or dot segments.
@@ -111,6 +120,14 @@ func (f *FakeS3) Serve(ctx context.Context, ln net.Listener) error {
 
 func (f *FakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	seq := f.requests.Add(1)
+	now := f.inFlight.Add(1)
+	defer f.inFlight.Add(-1)
+	for {
+		peak := f.maxInFlight.Load()
+		if now <= peak || f.maxInFlight.CompareAndSwap(peak, now) {
+			break
+		}
+	}
 	rawPath, _, _ := strings.Cut(r.RequestURI, "?")
 
 	h := w.Header()

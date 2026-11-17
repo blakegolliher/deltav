@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"deltav/internal/limit"
 	"deltav/internal/server"
 	"deltav/internal/telemetry"
 	"deltav/internal/version"
@@ -38,6 +39,8 @@ func newServeCmd() *cobra.Command {
 	f.StringVar(&cfg.APIToken, "api-token", "", "bearer token for the HTTP API; required when --http-addr is not loopback (prefer the env var)")
 	f.StringVar(&cfg.StateDir, "state-dir", "/var/lib/deltav", "directory for the state file (VAST clusters with their credentials, targets), kept at mode 0600")
 	f.DurationVar(&cfg.VASTPollInterval, "vast-poll-interval", server.DefaultVASTPollInterval, "how often each attached VAST cluster is read (three GETs)")
+	f.Float64Var(&cfg.LimitMinChange, "limit-min-change", limit.DefaultMinChange, "enforce mode: push a new per-Envoy share only if it differs from the one in force by more than this fraction")
+	f.DurationVar(&cfg.LimitMinInterval, "limit-min-interval", limit.DefaultMinInterval, "enforce mode: never push a new per-Envoy share sooner than this after the last one")
 	f.DurationVar(&cfg.LoadReportInterval, "load-report-interval", telemetry.DefaultLoadReportInterval, "how often each Envoy reports in-flight requests per endpoint")
 	f.BoolVar(&cfg.MetricsPerMember, "metrics-per-member", false, "add per-Envoy series to /metrics (many series on a large fleet)")
 	f.StringArrayVar(&static, "static-target", nil, "serve a fixed endpoint list with no VAST cluster, for testing: "+staticTargetSyntax+"; repeat the flag, or separate targets with ';'")
@@ -56,28 +59,10 @@ func newVersionCmd() *cobra.Command {
 	}
 }
 
-// notYet marks a command whose implementation lands in a later milestone, so
-// the command tree and its help text are complete from the start.
-func notYet(milestone int) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, _ []string) error {
-		return fmt.Errorf("%q is not implemented yet (milestone %d)", cmd.CommandPath(), milestone)
-	}
-}
-
-func leaf(use, short string, milestone int) *cobra.Command {
-	return &cobra.Command{Use: use, Short: short, RunE: notYet(milestone)}
-}
-
 func group(use, short string, children ...*cobra.Command) *cobra.Command {
 	cmd := &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs}
 	cmd.AddCommand(children...)
 	return cmd
-}
-
-func newLimitCmd() *cobra.Command {
-	return group("limit", "Per-CNode connection limits",
-		leaf("set TARGET", "Set a target's per-CNode connection limit and mode (alert|enforce)", 7),
-	)
 }
 
 func newBootstrapCmd() *cobra.Command {

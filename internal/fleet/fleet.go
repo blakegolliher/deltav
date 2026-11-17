@@ -239,6 +239,19 @@ func (r *Registry) Prune(retention time.Duration) int {
 	return n
 }
 
+// Connected is the number of Envoys with an open ADS stream.
+func (r *Registry) Connected() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, m := range r.members {
+		if m.Connected {
+			n++
+		}
+	}
+	return n
+}
+
 // List returns a copy of every member, sorted by node ID.
 func (r *Registry) List() []Member {
 	r.mu.Lock()

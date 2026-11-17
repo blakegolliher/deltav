@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"deltav/internal/server"
 	"deltav/internal/vast/vasttest"
 )
@@ -107,7 +109,7 @@ func TestVastAndTargetCommands(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("target list:\n%s", got)
 	}
-	if row := strings.Join(strings.Fields(lines[1]), " "); row != "s3 127.0.0.1:9000 vast lab main no 6 6 of 6 VIPs on healthy CNodes" {
+	if row := strings.Join(strings.Fields(lines[1]), " "); row != "s3 127.0.0.1:9000 vast lab main no 6 - 6 of 6 VIPs on healthy CNodes" {
 		t.Errorf("target list row: %q", row)
 	}
 	if row := strings.Join(strings.Fields(lines[2]), " "); !strings.HasPrefix(row, "s3tls 127.0.0.1:9443 vast lab main yes 6") {
@@ -197,7 +199,7 @@ func TestFleetAndNodeList(t *testing.T) {
 		t.Fatalf("node list:\n%s", got)
 	}
 	for i, name := range []string{"cnode-3-10", "cnode-3-11", "cnode-3-12"} {
-		if row := strings.Join(strings.Fields(lines[i+1]), " "); row != "lab "+name+" ACTIVE 2 0 0.0 0.00 0.00 - - 0.0 0.0" {
+		if row := strings.Join(strings.Fields(lines[i+1]), " "); row != "lab "+name+" ACTIVE 2 0 0.0 0.00 0.00 - - 0.0 0.0 -" {
 			t.Errorf("node list row %d: %q", i, row)
 		}
 	}
@@ -235,4 +237,87 @@ func TestTUINeedsATerminal(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "needs a terminal") {
 		t.Fatalf("got %v", err)
 	}
+}
+
+func TestLimitAndDrainCommands(t *testing.T) {
+	api, mock := daemon(t)
+	t.Setenv("DELTAV_PASSWORD", vasttest.Password)
+	mustRun(t, "vast", "add", "lab", "--api", api, "--host", mock.Host(), "--user", vasttest.User, "--insecure")
+	mustRun(t, "target", "add", "s3", "--api", api, "--cluster", "lab", "--pool", "main", "--port", "80", "--listen-port", "9000")
+
+	// Alert is the default and says that nothing is enforced.
+	got := mustRun(t, "limit", "set", "s3", "--api", api, "--per-cnode", "100")
+	if got != "s3: 100 connections per CNode, alert only: CNodes over it are reported, nothing is enforced\n" {
+		t.Errorf("limit set (alert): %q", got)
+	}
+	// Enforce says what each Envoy gets. No Envoy is connected, which
+	// counts as one: 100 / (1 x 2 VIPs per CNode) = 50.
+	got = mustRun(t, "limit", "set", "s3", "--api", api, "--per-cnode", "100", "--mode", "enforce")
+	if got != "s3: 100 connections per CNode, enforced: each of 1 Envoys may open 50 to each VIP (a CNode hosts up to 2 of this target's VIPs)\n" {
+		t.Errorf("limit set (enforce): %q", got)
+	}
+	// A limit too small to divide: the share stops at 1 and the command says
+	// what that allows.
+	got = mustRun(t, "limit", "set", "s3", "--api", api, "--per-cnode", "1", "--mode", "enforce")
+	if !strings.Contains(got, "may open 1 to each VIP") || !strings.Contains(got, "the share cannot go below 1, so the fleet can reach 2") {
+		t.Errorf("limit set below the floor: %q", got)
+	}
+	got = mustRun(t, "target", "list", "--api", api)
+	if row := strings.Join(strings.Fields(strings.Split(got, "\n")[1]), " "); !strings.HasPrefix(row, "s3 127.0.0.1:9000 vast lab main no 6 1 enforce (1 per Envoy per VIP) 6 of 6 VIPs") {
+		t.Errorf("target list with a limit: %q", row)
+	}
+	if _, err := run(t, "dv", "limit", "set", "s3", "--api", api, "--per-cnode", "5", "--mode", "strict"); err == nil || !strings.Contains(err.Error(), "alert or enforce") {
+		t.Errorf("bad mode: %v", err)
+	}
+	if _, err := run(t, "dv", "limit", "set", "s3", "--api", api); err == nil || !strings.Contains(err.Error(), "--per-cnode") {
+		t.Errorf("no --per-cnode: %v", err)
+	}
+	if _, err := run(t, "dv", "limit", "set", "nope", "--api", api, "--per-cnode", "5"); err == nil || !strings.Contains(err.Error(), "no target") {
+		t.Errorf("unknown target: %v", err)
+	}
+	if got = mustRun(t, "limit", "set", "s3", "--api", api, "--per-cnode", "0"); got != "s3: no limit\n" {
+		t.Errorf("removing the limit: %q", got)
+	}
+
+	// Drain: with one cluster attached there is no need to name it.
+	if got = mustRun(t, "node", "drain", "cnode-3-11", "--api", api); got != "drained cnode-3-11 on lab\n" {
+		t.Errorf("node drain: %q", got)
+	}
+	got = mustRun(t, "node", "list", "--api", api)
+	if !strings.Contains(got, "ACTIVE (drained)") || strings.Count(got, "(drained)") != 1 {
+		t.Errorf("node list after a drain:\n%s", got)
+	}
+	got = mustRun(t, "target", "list", "--api", api)
+	if !strings.Contains(got, "6 of 6 VIPs on healthy CNodes, 2 withheld by drain") || !strings.Contains(got, " 4 ") {
+		t.Errorf("target list after a drain:\n%s", got)
+	}
+	if _, err := run(t, "dv", "node", "drain", "cnode-9-99", "--api", api); err == nil || !strings.Contains(err.Error(), "has no CNode") {
+		t.Errorf("draining an unknown CNode: %v", err)
+	}
+	if got = mustRun(t, "node", "undrain", "cnode-3-11", "--api", api, "--cluster", "lab"); got != "undrained cnode-3-11 on lab\n" {
+		t.Errorf("node undrain: %q", got)
+	}
+	if _, err := run(t, "dv", "node", "undrain", "cnode-3-11", "--api", api); err == nil || !strings.Contains(err.Error(), "is not drained") {
+		t.Errorf("undraining twice: %v", err)
+	}
+	if mock.Mutating() != 0 {
+		t.Errorf("%d requests other than GET and the token call reached the cluster", mock.Mutating())
+	}
+}
+
+// Every command in the tree does something: none is a placeholder.
+func TestNoPlaceholderCommands(t *testing.T) {
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if !c.HasSubCommands() && c.RunE == nil && c.Run == nil {
+			t.Errorf("%q has no implementation", c.CommandPath())
+		}
+		if c.HasSubCommands() && c.Short == "" {
+			t.Errorf("%q has no description", c.CommandPath())
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(NewRoot("deltav"))
 }

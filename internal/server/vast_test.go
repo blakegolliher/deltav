@@ -415,7 +415,7 @@ func TestTargetWaitsForFirstPoll(t *testing.T) {
 	addCluster(t, s1, m)
 	addTarget(t, s1, "s3", "main", 9000)
 	stop()
-	if err := os.Remove(filepath.Join(dir, "endpoints.json")); err != nil {
+	if err := os.Remove(filepath.Join(dir, "served.json")); err != nil {
 		t.Fatal(err)
 	}
 	m.FailNext(100)

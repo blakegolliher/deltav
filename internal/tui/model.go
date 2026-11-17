@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -32,6 +33,19 @@ var (
 	fleetConnected = []string{"", "true", "false"}
 )
 
+// limitEdit is a per-CNode limit being typed for a target.
+type limitEdit struct {
+	target string
+	mode   string // kept as it is; "m" changes it
+	draft  string
+}
+
+// drainConfirm is a drain or undrain waiting for a yes.
+type drainConfirm struct {
+	cluster, cnode string
+	drain          bool
+}
+
 // eventInterval is how often the daemon is asked to send an overview.
 const eventInterval = 2 * time.Second
 
@@ -57,7 +71,13 @@ type Model struct {
 	fleet    *Fleet
 	targets  []TargetInfo
 	clusters []Cluster
-	loaded   bool // controls data has arrived at least once
+	control  []CNode // the CNodes listed on the Controls view
+	loaded   bool    // controls data has arrived at least once
+
+	// Controls: at most one of these is in progress.
+	editing *limitEdit    // typing a target's limit
+	confirm *drainConfirm // asked whether to drain or undrain a CNode
+	notice  string        // what the last change did
 
 	cursor   [4]int
 	expanded map[string]bool // CNodes whose VIP rows are shown
@@ -108,7 +128,13 @@ type (
 	controlsMsg struct {
 		targets  []TargetInfo
 		clusters []Cluster
+		cnodes   []CNode
 		err      error
+	}
+	// actionMsg reports a change made from the Controls view.
+	actionMsg struct {
+		done string
+		err  error
 	}
 )
 
@@ -166,7 +192,14 @@ func (m *Model) fetch(withOverview bool) tea.Cmd {
 				return controlsMsg{err: err}
 			}
 			clusters, err := api.Clusters(ctx)
-			return controlsMsg{targets, clusters, err}
+			if err != nil {
+				return controlsMsg{err: err}
+			}
+			cnodes, err := api.CNodes(ctx, win)
+			if err != nil {
+				return controlsMsg{err: err}
+			}
+			return controlsMsg{targets, clusters, cnodes.CNodes, nil}
 		})
 	}
 	return tea.Batch(cmds...)
@@ -188,9 +221,22 @@ func (m *Model) rows() int {
 			return len(m.fleet.Members)
 		}
 	case tabControls:
-		return len(m.targets)
+		return len(m.targets) + len(m.control)
 	}
 	return 0
+}
+
+// selection returns what the Controls cursor is on: a target or a CNode.
+func (m *Model) selection() (*TargetInfo, *CNode) {
+	i := m.cursor[tabControls]
+	switch {
+	case i < 0:
+	case i < len(m.targets):
+		return &m.targets[i], nil
+	case i-len(m.targets) < len(m.control):
+		return nil, &m.control[i-len(m.targets)]
+	}
+	return nil, nil
 }
 
 func (m *Model) clampCursor() {
@@ -245,8 +291,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case controlsMsg:
 		if m.fail(msg.err); msg.err == nil {
-			m.targets, m.clusters, m.loaded = msg.targets, msg.clusters, true
+			m.targets, m.clusters, m.control, m.loaded = msg.targets, msg.clusters, msg.cnodes, true
 		}
+	case actionMsg:
+		m.fail(msg.err)
+		m.notice = ""
+		if msg.err == nil {
+			m.notice = msg.done
+		}
+		return m, m.fetch(true)
 
 	case tea.KeyPressMsg:
 		return m.key(msg)
@@ -257,6 +310,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
+	if m.editing != nil {
+		return m.editKey(k, msg)
+	}
+	if m.confirm != nil {
+		c := m.confirm
+		m.confirm = nil
+		if k == "ctrl+c" {
+			return m, tea.Quit
+		}
+		if k != "y" && k != "Y" {
+			return m, nil
+		}
+		api, ctx := m.api, m.ctx
+		done := "undrained " + c.cnode + ": its VIPs are served again"
+		if c.drain {
+			done = "drained " + c.cnode + ": its VIPs have left every Envoy"
+		}
+		return m, func() tea.Msg { return actionMsg{done, api.SetDrained(ctx, c.cluster, c.cnode, c.drain)} }
+	}
 	if m.filtering {
 		switch k {
 		case "enter":
@@ -347,7 +419,76 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if refetch {
 			return m, m.fetch(false)
 		}
+	case tabControls:
+		m.clampCursor()
+		target, cnode := m.selection()
+		switch k {
+		case "e", "m":
+			switch {
+			case target == nil:
+				m.errText = "move to a target to change its limit"
+			case target.Source != "vast":
+				m.errText = "a static target has no CNodes, so it cannot have a per-CNode limit"
+			case k == "e":
+				m.editing = &limitEdit{target: target.Name, mode: "alert"}
+				if target.Status != nil && target.Status.Limit != nil {
+					m.editing.mode = target.Status.Limit.Mode
+					m.editing.draft = fmt.Sprint(target.Status.Limit.PerCNode)
+				}
+			case target.Status == nil || target.Status.Limit == nil:
+				m.errText = "set a limit first (e); it starts in alert mode"
+			default:
+				l, name := target.Status.Limit, target.Name
+				mode := "enforce"
+				if l.Mode == "enforce" {
+					mode = "alert"
+				}
+				api, ctx := m.api, m.ctx
+				return m, func() tea.Msg {
+					return actionMsg{fmt.Sprintf("%s: limit %d is now in %s mode", name, l.PerCNode, mode), api.SetLimit(ctx, name, l.PerCNode, mode)}
+				}
+			}
+		case "d":
+			if cnode == nil {
+				m.errText = "move to a CNode to drain or undrain it"
+			} else {
+				m.confirm = &drainConfirm{cluster: cnode.Cluster, cnode: cnode.Name, drain: !cnode.Drained}
+			}
+		}
 	}
 	m.clampCursor()
+	return m, nil
+}
+
+// editKey handles a key while a limit is being typed.
+func (m *Model) editKey(k string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	e := m.editing
+	switch k {
+	case "esc":
+		m.editing = nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "backspace":
+		if len(e.draft) > 0 {
+			e.draft = e.draft[:len(e.draft)-1]
+		}
+	case "enter":
+		m.editing = nil
+		n, err := strconv.ParseUint(e.draft, 10, 32)
+		if err != nil {
+			m.errText = fmt.Sprintf("%q is not a number of connections", e.draft)
+			return m, nil
+		}
+		api, ctx := m.api, m.ctx
+		done := fmt.Sprintf("%s: limit %d connections per CNode, %s mode", e.target, n, e.mode)
+		if n == 0 {
+			done = e.target + ": limit removed"
+		}
+		return m, func() tea.Msg { return actionMsg{done, api.SetLimit(ctx, e.target, uint32(n), e.mode)} }
+	default:
+		if t := msg.Key().Text; len(t) == 1 && t[0] >= '0' && t[0] <= '9' && len(e.draft) < 9 {
+			e.draft += t
+		}
+	}
 	return m, nil
 }

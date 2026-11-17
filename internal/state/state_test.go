@@ -115,26 +115,29 @@ func TestStateRules(t *testing.T) {
 	}
 }
 
-func TestEndpointCache(t *testing.T) {
+func TestCache(t *testing.T) {
 	dir := t.TempDir()
 	s := open(t, dir)
-	if got := s.LoadEndpoints(); len(got) != 0 {
-		t.Fatalf("empty cache: %v", got)
+	if got := s.LoadCache(); len(got.Endpoints) != 0 || len(got.Shares) != 0 {
+		t.Fatalf("empty cache: %+v", got)
 	}
-	want := map[string][]Endpoint{"main": {{IP: "192.0.2.1", Port: 80, CNode: "cnode-1"}, {IP: "192.0.2.2", Port: 80}}}
-	if err := s.SaveEndpoints(want); err != nil {
+	want := Cache{
+		Endpoints: map[string][]Endpoint{"main": {{IP: "192.0.2.1", Port: 80, CNode: "cnode-1"}, {IP: "192.0.2.2", Port: 80}}},
+		Shares:    map[string]uint32{"main": 5},
+	}
+	if err := s.SaveCache(want); err != nil {
 		t.Fatal(err)
 	}
-	got := open(t, dir).LoadEndpoints()
-	if len(got["main"]) != 2 || got["main"][0] != want["main"][0] || got["main"][1] != want["main"][1] {
-		t.Errorf("cache after reopen: %v", got)
+	got := open(t, dir).LoadCache()
+	if len(got.Endpoints["main"]) != 2 || got.Endpoints["main"][0] != want.Endpoints["main"][0] || got.Endpoints["main"][1] != want.Endpoints["main"][1] || got.Shares["main"] != 5 {
+		t.Errorf("cache after reopen: %+v", got)
 	}
 	// A damaged cache is only a cache: ignore it.
-	if err := os.WriteFile(filepath.Join(dir, "endpoints.json"), []byte("{broken"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "served.json"), []byte("{broken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.LoadEndpoints(); len(got) != 0 {
-		t.Errorf("damaged cache: %v", got)
+	if got := s.LoadCache(); len(got.Endpoints) != 0 || got.Endpoints == nil || got.Shares == nil {
+		t.Errorf("damaged cache: %+v", got)
 	}
 }
 
@@ -152,7 +155,61 @@ func TestOpenFailsClearly(t *testing.T) {
 	}
 	// In-memory store: works, writes nothing.
 	mem := open(t, "")
-	if err := mem.AddCluster(lab); err != nil || len(mem.Clusters()) != 1 || mem.SaveEndpoints(nil) != nil {
+	if err := mem.AddCluster(lab); err != nil || len(mem.Clusters()) != 1 || mem.SaveCache(Cache{}) != nil {
 		t.Errorf("in-memory store: %v", err)
+	}
+}
+
+func TestLimitsAndDrains(t *testing.T) {
+	dir := t.TempDir()
+	s := open(t, dir)
+	is := func(err, want error, what string) {
+		t.Helper()
+		if !errors.Is(err, want) {
+			t.Errorf("%s: got %v, want %v", what, err, want)
+		}
+	}
+	is(s.AddCluster(lab), nil, "cluster")
+	is(s.AddTarget(main, nil), nil, "target")
+
+	is(s.SetTargetLimit("nope", &Limit{PerCNode: 10, Mode: ModeAlert}), ErrNotFound, "limit on an unknown target")
+	is(s.SetTargetLimit("main", &Limit{PerCNode: 10, Mode: "strict"}), ErrInvalid, "unknown mode")
+	before := s.Targets()
+	is(s.SetTargetLimit("main", &Limit{PerCNode: 100, Mode: ModeEnforce}), nil, "setting a limit")
+	if before[0].Limit != nil {
+		t.Error("setting a limit changed a target list handed out earlier")
+	}
+	if got := s.Targets()[0].Limit; got == nil || *got != (Limit{PerCNode: 100, Mode: ModeEnforce}) {
+		t.Errorf("limit = %+v", got)
+	}
+
+	is(s.SetDrained("nope", "cnode-1", true), ErrNotFound, "draining on an unknown cluster")
+	is(s.SetDrained("lab", "cnode-1", false), ErrNotFound, "undraining a CNode that is not drained")
+	is(s.SetDrained("lab", "cnode-2", true), nil, "draining")
+	is(s.SetDrained("lab", "cnode-1", true), nil, "draining another")
+	is(s.SetDrained("lab", "cnode-1", true), nil, "draining it again")
+	if got := s.Drained(); len(got) != 2 || got[0] != (Drain{"lab", "cnode-1"}) || got[1] != (Drain{"lab", "cnode-2"}) {
+		t.Errorf("drained = %+v", got)
+	}
+
+	// Both survive a restart.
+	again := open(t, dir)
+	if got := again.Targets()[0].Limit; got == nil || got.PerCNode != 100 || got.Mode != ModeEnforce {
+		t.Errorf("limit after reopen = %+v", got)
+	}
+	if got := again.Drained(); len(got) != 2 {
+		t.Errorf("drained after reopen = %+v", got)
+	}
+
+	is(again.SetDrained("lab", "cnode-2", false), nil, "undraining")
+	is(again.SetTargetLimit("main", &Limit{PerCNode: 0, Mode: ModeAlert}), nil, "a limit of 0 removes it")
+	if again.Targets()[0].Limit != nil || len(again.Drained()) != 1 {
+		t.Errorf("after clearing: limit %+v, drained %+v", again.Targets()[0].Limit, again.Drained())
+	}
+	// Detaching a cluster forgets its drains.
+	is(again.RemoveTarget("main"), nil, "removing the target")
+	is(again.RemoveCluster("lab"), nil, "removing the cluster")
+	if len(again.Drained()) != 0 {
+		t.Errorf("drains left behind: %+v", again.Drained())
 	}
 }

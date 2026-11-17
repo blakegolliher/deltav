@@ -58,8 +58,12 @@ type targetJSON struct {
 	Pool    string `json:"pool,omitempty"`
 	Tenant  string `json:"tenant,omitempty"`
 	Port    uint32 `json:"port,omitempty"` // the S3 port on the VIPs
-	// Status says how a VAST target resolved at the last poll.
-	Status    *targetStatus  `json:"status,omitempty"`
+	// Status says how a VAST target resolved at the last poll, and how its
+	// limit, if it has one, is being applied.
+	Status *targetStatus `json:"status,omitempty"`
+	// Over lists the CNodes whose requests in flight for this target
+	// exceed its limit now.
+	Over      []cnodeUsage   `json:"over,omitempty"`
 	Endpoints []endpointJSON `json:"endpoints"` // what Envoys are served
 }
 
@@ -80,6 +84,7 @@ func (s *Server) targetList() []targetJSON {
 		}
 		served[t.Name] = eps
 	}
+	usage := s.limitUsage()
 	out := []targetJSON{}
 	for _, t := range s.staticTargets() {
 		out = append(out, targetJSON{Name: t.Name, ListenPort: t.ListenPort, TLS: t.TLS != nil, Source: "static", Endpoints: served[t.Name]})
@@ -91,6 +96,9 @@ func (s *Server) targetList() []targetJSON {
 		}
 		if st, ok := s.poller.targetStatus(t.Name); ok {
 			tj.Status = &st
+		}
+		if t.Limit != nil {
+			tj.Over = overLimit(usage, t.Name)
 		}
 		if tj.Endpoints == nil {
 			tj.Endpoints = []endpointJSON{}
@@ -146,6 +154,10 @@ type targetOverview struct {
 	// RateHistory is the request rate per second in each of the last
 	// complete 10-second slots, oldest first, for a sparkline.
 	RateHistory []float64 `json:"rate_history"`
+	// Limit is the target's per-CNode connection limit, if it has one, and
+	// Over the CNodes that exceed it now.
+	Limit *limitStatus `json:"limit,omitempty"`
+	Over  []cnodeUsage `json:"over,omitempty"`
 }
 
 type overviewResponse struct {
@@ -165,8 +177,12 @@ func (s *Server) overview(win metrics.Window) overviewResponse {
 	stats := s.agg.Targets(win)
 	history := s.agg.RateHistory(func(k metrics.EndpointKey) (string, bool) { return k.Target, true })
 	idle := s.agg.Idle(win)
+	usage := s.limitUsage()
 	for _, t := range s.xds.Targets() {
 		o := targetOverview{Name: t.Name, ListenPort: t.ListenPort, TLS: t.TLS != nil, Endpoints: len(t.Endpoints), Stats: idle}
+		if st, ok := s.poller.targetStatus(t.Name); ok && st.Limit != nil {
+			o.Limit, o.Over = st.Limit, overLimit(usage, t.Name)
+		}
 		if o.RateHistory = history[t.Name]; o.RateHistory == nil {
 			o.RateHistory = make([]float64, metrics.HistoryPoints)
 		}

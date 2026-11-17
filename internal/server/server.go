@@ -65,6 +65,13 @@ type Config struct {
 	// VASTPollInterval is how often each VAST cluster is read; zero means
 	// DefaultVASTPollInterval.
 	VASTPollInterval time.Duration
+
+	// In enforce mode a target's per-Envoy share is pushed again only when
+	// it has changed by more than LimitMinChange (a fraction) and at least
+	// LimitMinInterval after the last push; zero means the defaults in
+	// package limit. A push makes every Envoy reconnect that target's pools.
+	LimitMinChange   float64
+	LimitMinInterval time.Duration
 }
 
 // Server is a configured, not yet listening, daemon.
@@ -183,6 +190,10 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/targets", s.handleTargets)
 	mux.HandleFunc("POST /api/v1/targets", s.handleTargetAdd)
 	mux.HandleFunc("DELETE /api/v1/targets/{name}", s.handleTargetRemove)
+	mux.HandleFunc("PUT /api/v1/targets/{name}/limit", s.handleLimitSet)
+	mux.HandleFunc("DELETE /api/v1/targets/{name}/limit", s.handleLimitClear)
+	mux.HandleFunc("POST /api/v1/vast/{cluster}/cnodes/{cnode}/drain", s.handleDrain)
+	mux.HandleFunc("DELETE /api/v1/vast/{cluster}/cnodes/{cnode}/drain", s.handleDrain)
 	mux.HandleFunc("GET /api/v1/vast", s.handleClusters)
 	mux.HandleFunc("POST /api/v1/vast", s.handleClusterAdd)
 	mux.HandleFunc("DELETE /api/v1/vast/{name}", s.handleClusterRemove)

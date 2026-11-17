@@ -243,9 +243,28 @@ type targetRow struct {
 	Status     *struct {
 		VIPs    int
 		Healthy int
+		Drained int
 		Problem string
 		Held    bool
+		Limit   *limitStatus
 	}
+	Over []struct {
+		CNode    string
+		InFlight uint64 `json:"in_flight"`
+	}
+}
+
+// limit is the target list's LIMIT cell.
+func (t targetRow) limit() string {
+	if t.Status == nil || t.Status.Limit == nil {
+		return "-"
+	}
+	l := t.Status.Limit
+	cell := fmt.Sprintf("%d %s", l.PerCNode, l.Mode)
+	if l.Mode == "enforce" {
+		cell += fmt.Sprintf(" (%d per Envoy per VIP)", l.Share)
+	}
+	return cell
 }
 
 func (t targetRow) status() string {
@@ -259,7 +278,14 @@ func (t targetRow) status() string {
 	case t.Status.Held:
 		return "serving the last known endpoints: the pool resolved to none"
 	}
-	return fmt.Sprintf("%d of %d VIPs on healthy CNodes", t.Status.Healthy, t.Status.VIPs)
+	s := fmt.Sprintf("%d of %d VIPs on healthy CNodes", t.Status.Healthy, t.Status.VIPs)
+	if t.Status.Drained > 0 {
+		s += fmt.Sprintf(", %d withheld by drain", t.Status.Drained)
+	}
+	for _, o := range t.Over {
+		s += fmt.Sprintf("; OVER THE LIMIT on %s (%d in flight)", o.CNode, o.InFlight)
+	}
+	return s
 }
 
 func newTargetListCmd() *cobra.Command {
@@ -269,7 +295,7 @@ func newTargetListCmd() *cobra.Command {
 		Short: "List targets",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return show(cmd, &f, "/api/v1/targets", "NAME\tLISTEN\tSOURCE\tCLUSTER\tPOOL\tTLS\tENDPOINTS\tSTATUS",
+			return show(cmd, &f, "/api/v1/targets", "NAME\tLISTEN\tSOURCE\tCLUSTER\tPOOL\tTLS\tENDPOINTS\tLIMIT\tSTATUS",
 				func(v struct{ Targets []targetRow }) [][]string {
 					var rows [][]string
 					for _, t := range v.Targets {
@@ -277,7 +303,7 @@ func newTargetListCmd() *cobra.Command {
 						if t.TLS {
 							tls = "yes"
 						}
-						rows = append(rows, []string{t.Name, fmt.Sprintf("127.0.0.1:%d", t.ListenPort), t.Source, t.Cluster, t.Pool, tls, fmt.Sprint(len(t.Endpoints)), t.status()})
+						rows = append(rows, []string{t.Name, fmt.Sprintf("127.0.0.1:%d", t.ListenPort), t.Source, t.Cluster, t.Pool, tls, fmt.Sprint(len(t.Endpoints)), t.limit(), t.status()})
 					}
 					return rows
 				})

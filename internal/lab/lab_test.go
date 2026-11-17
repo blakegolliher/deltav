@@ -213,6 +213,22 @@ func TestEveryNthFailure(t *testing.T) {
 	}
 }
 
+func TestMaxInFlight(t *testing.T) {
+	endpoint, fake := startFake(t, FakeS3Config{Latency: 100 * time.Millisecond})
+	res := mustRun(t, LoadConfig{Endpoint: endpoint, Bucket: "b", Concurrency: 6, Requests: 18})
+	if res.Status[200] != 18 {
+		t.Fatalf("status %v", res.Status)
+	}
+	if got := fake.Stats().MaxInFlight; got != 6 {
+		t.Errorf("max in flight = %d with 6 workers and a slow backend", got)
+	}
+	fake.ResetMaxInFlight()
+	mustRun(t, LoadConfig{Endpoint: endpoint, Bucket: "b", Concurrency: 2, Requests: 4})
+	if got := fake.Stats().MaxInFlight; got != 2 {
+		t.Errorf("max in flight after a reset = %d with 2 workers", got)
+	}
+}
+
 func TestInjectedFailureBody(t *testing.T) {
 	endpoint, _ := startFake(t, FakeS3Config{Rate503: 1})
 	resp, err := http.Get(endpoint + "/bucket/a&b")
