@@ -44,6 +44,8 @@ and `third_party/licenses/` from what is actually linked.
 |---|---|---|---|---|
 | htmx and its `hx-sse` extension | 4.0.1 | 0BSD | Vendored into the embedded UI (milestone 5) | None. 0BSD is the zero-clause BSD, more permissive than BSD-2; approved as "BSD" on 2026-11-17. |
 | Tailwind CSS standalone CLI | 4.3.5 | MIT, © Tailwind Labs, Inc. | Build tool run by the Makefile; not shipped | The generated CSS embeds Tailwind's preflight. Keep the `/*! tailwindcss … MIT License */` banner in the committed CSS. |
+| S3 operation table adapted from [tollbooth](https://github.com/blakegolliher/tollbooth) | 0.1.0 (c46606a) | Apache-2.0, © 2026 Blake Golliher | Restated as data in `internal/ratelimit/ops.go`, from which the classifier that runs in Envoy is generated, so that a rate rule means the same in both | Keep the attribution in that file's header; ship tollbooth's `LICENSE` and `NOTICE` (`third_party/static/tollbooth/`). The author of both projects may prefer to relicense the table instead. |
+| gopher-lua | v1.1.2 | MIT, © 2015 Yusuke Inuzuka | Tests only: runs the generated Lua script without Envoy. Not linked into `deltav` | None for the binary. |
 | Envoy | 1.40.2 | Apache-2.0 | Unmodified upstream binary on client hosts and in the test harness; not linked | If we ever *ship* Envoy binaries, include its LICENSE and NOTICE. |
 
 ## Notes

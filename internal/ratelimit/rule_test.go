@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -111,6 +112,17 @@ func TestSentence(t *testing.T) {
 		}
 		if got := c.r.Sentence(); got != c.want {
 			t.Errorf("%s:\n got  %s\n want %s", c.r.Name, got, c.want)
+		}
+	}
+}
+
+// The operation table is adapted from tollbooth (Apache-2.0), whose license
+// and notice go wherever the table goes.
+func TestAdaptedTableKeepsItsNotice(t *testing.T) {
+	for _, f := range []string{"LICENSE", "NOTICE"} {
+		b, err := os.ReadFile("../../third_party/static/tollbooth/" + f)
+		if err != nil || len(b) < 200 {
+			t.Errorf("third_party/static/tollbooth/%s is missing or empty: %v", f, err)
 		}
 	}
 }

@@ -87,6 +87,94 @@
   </div>
 </section>
 
+<section class="card" aria-labelledby="rules-title">
+  <div class="card-head">
+    <h2 id="rules-title">Request-rate rules</h2>
+    <span class="hint">How many requests of which kind the fleet lets through. A rule's rate is the whole fleet's: it is divided among the Envoys that are using it, by what each asks for, and follows a change within about 5 seconds. A request must be allowed by every rule it matches.</span>
+  </div>
+  {{if .Rules}}
+  <div class="scroll">
+  <table class="table">
+    <thead>
+      <tr>
+        <th scope="col">Rule</th>
+        <th scope="col" class="num" title="Requests per second the rule matched and let through, in the Envoys' last reports">Allowed/s</th>
+        <th scope="col" class="num" title="Requests per second the rule refused">Refused/s</th>
+        <th scope="col" title="What the rule is counting now, and where it is refusing most">Counting</th>
+        <th scope="col"><span class="sr">Action</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Rules}}
+      <tr id="rule-{{.Name}}">
+        <th scope="row">
+          <span class="name">{{.Name}}</span>
+          <span class="sub wrap">{{.Sentence}}</span>
+          {{if .Note}}<span class="sub wrap">Note: {{.Note}}</span>{{end}}
+        </th>
+        <td class="num">{{rate .Status.AllowedRate}}</td>
+        <td class="num{{if .Status.DeniedRate}} flagged{{end}}">{{rate .Status.DeniedRate}}</td>
+        <td>
+          {{if .Status.Keys}}
+          {{count .Status.Keys}} {{if eq .Status.Keys 1}}count{{else}}counts{{end}} on {{count .Status.Envoys}} {{if eq .Status.Envoys 1}}Envoy{{else}}Envoys{{end}}
+          {{range first 3 .Status.Top}}<span class="sub"><code>{{.Key}}</code>: {{rate .AllowedRate}}/s allowed, {{rate .DeniedRate}}/s refused</span>{{end}}
+          {{else}}<span class="quiet">Nothing matches it now</span>{{end}}
+        </td>
+        <td class="act">
+          <form method="post" action="/controls/rules/remove" {{submit "/controls/rules/remove"}} hx-confirm="Remove rule {{.Name}}? Every Envoy stops applying it at once.">
+            <input type="hidden" name="name" value="{{.Name}}">
+            <button class="btn">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">No rate rules. Requests are not limited by rate.</p>
+  {{end}}
+  <details class="more" hx-morph-skip{{if eq .OpenForm "rule"}} open{{end}}>
+    <summary>Add or replace a rule</summary>
+    <form method="post" action="/controls/rules" {{submit "/controls/rules"}} class="form-grid">
+      <label class="field"><span>Name</span><input class="input" name="name" required pattern="[A-Za-z0-9_.\-]{1,64}" value="{{.NewRule.Name}}" autocomplete="off" spellcheck="false"><small>A rule of the same name is replaced.</small></label>
+      <label class="field"><span>Operations <em>(optional)</em></span><input class="input" name="operation" value="{{.NewRule.Operation}}" autocomplete="off" spellcheck="false" placeholder="PutObject, UploadPart"><small>S3 operation names, separated by commas; <code>List*</code> names a family. Empty means every operation.</small></label>
+      <label class="field"><span>Access keys <em>(optional)</em></span><input class="input" name="access_key" value="{{.NewRule.AccessKey}}" autocomplete="off" spellcheck="false"><small>Access key IDs, separated by commas. <code>-</code> is a request that carries none.</small></label>
+      <label class="field"><span>Buckets <em>(optional)</em></span><input class="input" name="bucket" value="{{.NewRule.Bucket}}" autocomplete="off" spellcheck="false"><small>Separated by commas.</small></label>
+      <label class="field"><span>Key prefixes <em>(optional)</em></span><textarea class="input input-area" name="prefix" rows="2" autocomplete="off" spellcheck="false">{{.NewRule.Prefix}}</textarea><small>One to a line. Compared with the object key, or a listing's prefix.</small></label>
+      <fieldset class="field-set">
+        <legend>Limit</legend>
+        <label class="field"><span>Requests</span><input class="input input-num" type="number" name="limit" min="0" step="any" value="{{.NewRule.Limit}}" inputmode="decimal"></label>
+        <label class="field"><span>Per</span>
+          <select class="input" name="unit">
+            <option value="second"{{if eq .NewRule.Unit "second"}} selected{{end}}>second</option>
+            <option value="minute"{{if eq .NewRule.Unit "minute"}} selected{{end}}>minute</option>
+            <option value="hour"{{if eq .NewRule.Unit "hour"}} selected{{end}}>hour</option>
+          </select>
+        </label>
+        <label class="field"><span>Burst <em>(optional)</em></span><input class="input input-num" type="number" name="burst" min="1" step="1" value="{{.NewRule.Burst}}" inputmode="numeric"><small>How many may pass at once after a quiet spell. Default: the limit's own number.</small></label>
+        <label class="check"><input type="checkbox" name="blocked" value="true"{{if .NewRule.Blocked}} checked{{end}}><span>Refuse everything that matches, instead of a limit</span></label>
+      </fieldset>
+      <fieldset class="field-set">
+        <legend>Count the limit per</legend>
+        <label class="check"><input type="checkbox" name="per" value="total"{{if index .NewRule.Per "total"}} checked{{end}}><span>Nothing: one count for everything the rule matches</span></label>
+        <label class="check"><input type="checkbox" name="per" value="access_key"{{if index .NewRule.Per "access_key"}} checked{{end}}><span>Access key</span></label>
+        <label class="check"><input type="checkbox" name="per" value="bucket"{{if index .NewRule.Per "bucket"}} checked{{end}}><span>Bucket</span></label>
+        <label class="check"><input type="checkbox" name="per" value="prefix"{{if index .NewRule.Per "prefix"}} checked{{end}}><span>Listed prefix</span></label>
+        <label class="check"><input type="checkbox" name="per" value="client"{{if index .NewRule.Per "client"}} checked{{end}}><span>Client host: each host gets the whole rate to itself, not a share of it</span></label>
+      </fieldset>
+      <label class="field"><span>Answer a refused request with</span>
+        <select class="input" name="respond">
+          <option value="503"{{if ne .NewRule.Respond "429"}} selected{{end}}>503 SlowDown, as S3 does</option>
+          <option value="429"{{if eq .NewRule.Respond "429"}} selected{{end}}>429 TooManyRequests</option>
+        </select>
+      </label>
+      <label class="field"><span>Note <em>(optional)</em></span><input class="input" name="note" maxlength="200" value="{{.NewRule.Note}}" autocomplete="off"></label>
+      <div class="form-end"><button class="btn btn-main">Set rule</button><span class="hint">If the daemon cannot be reached for more than ten minutes, Envoys stop applying rate rules until it is back.</span></div>
+    </form>
+  </details>
+</section>
+
 <section class="card" aria-labelledby="drain-title">
   <div class="card-head">
     <h2 id="drain-title">Drain a CNode</h2>

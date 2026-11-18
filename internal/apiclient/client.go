@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"deltav/internal/metrics"
+	"deltav/internal/ratelimit"
 )
 
 // The API's shapes, as far as the UIs read them.
@@ -71,11 +72,21 @@ type Target struct {
 	Over        []Usage      `json:"over"`
 }
 
+// RateRules sums up the request-rate rules for an overview.
+type RateRules struct {
+	Rules       int     `json:"rules"`
+	AllowedRate float64 `json:"allowed_rate"` // matched and let through, per second
+	DeniedRate  float64 `json:"denied_rate"`  // refused, per second
+	// Refusing names the rules that are refusing requests now.
+	Refusing []string `json:"refusing"`
+}
+
 type Overview struct {
 	ConfigVersion string      `json:"config_version"`
 	Window        string      `json:"window"`
 	Fleet         FleetCounts `json:"fleet"`
 	Targets       []Target    `json:"targets"`
+	RateRules     RateRules   `json:"rate_rules"`
 }
 
 type VIPRow struct {
@@ -461,6 +472,32 @@ func (c *Client) SetDrained(ctx context.Context, cluster, cnode string, drained 
 		method = http.MethodPost
 	}
 	return c.send(ctx, method, "/api/v1/vast/"+url.PathEscape(cluster)+"/cnodes/"+url.PathEscape(cnode)+"/drain", nil)
+}
+
+// RuleStatus is a request-rate rule with what it means in words and what
+// Envoys last reported for it.
+type RuleStatus struct {
+	ratelimit.Rule
+	Limit    string           `json:"limit"`
+	Sentence string           `json:"sentence"`
+	Status   ratelimit.Status `json:"status"`
+}
+
+// Rules returns the request-rate rules in the order they apply.
+func (c *Client) Rules(ctx context.Context) ([]RuleStatus, error) {
+	var out struct {
+		Rules []RuleStatus `json:"rules"`
+	}
+	return out.Rules, c.get(ctx, "/api/v1/rules", &out)
+}
+
+// SetRule adds a rule, or replaces the one of the same name.
+func (c *Client) SetRule(ctx context.Context, r ratelimit.Rule) error {
+	return c.send(ctx, http.MethodPut, "/api/v1/rules/"+url.PathEscape(r.Name), r)
+}
+
+func (c *Client) RemoveRule(ctx context.Context, name string) error {
+	return c.send(ctx, http.MethodDelete, "/api/v1/rules/"+url.PathEscape(name), nil)
 }
 
 // AddCluster attaches a VAST cluster. The daemon reads it once first, so

@@ -628,3 +628,70 @@ func TestUIEscapesWhatOthersSupply(t *testing.T) {
 	_, _, cn := page(t, s, "/cnodes")
 	mustContain(t, "cnodes", cn, "VAST reports &#34;&gt;&lt;script&gt;")
 }
+
+// Rate rules in the web UI: the form, the table, and the Overview's tile.
+func TestUIRateRules(t *testing.T) {
+	s, _ := uiDaemon(t)
+	_, _, ctl := page(t, s, "/controls")
+	mustContain(t, "controls without rules", ctl, "Request-rate rules", "No rate rules. Requests are not limited by rate.", "Add or replace a rule",
+		`action="/controls/rules"`, `name="per" value="access_key"`, `<option value="503" selected>`)
+	_, _, home := page(t, s, "/")
+	mustContain(t, "overview without rules", home, "Refused by rate rules, per second", "No rate rules. Add one under")
+
+	submit := func(what string, form url.Values, wantCode int, wants ...string) string {
+		t.Helper()
+		code, body := post(t, s, "/controls/rules", form)
+		if code != wantCode {
+			t.Errorf("%s: status %d, want %d", what, code, wantCode)
+		}
+		mustContain(t, what, body, wants...)
+		if err := wellFormed(body); err != nil {
+			t.Errorf("%s: %v", what, err)
+		}
+		return body
+	}
+	submit("a rule", url.Values{
+		"name": {"uploads"}, "operation": {"putobject, UploadPart"}, "access_key": {"AKIAEXAMPLE1,AKIAEXAMPLE2"}, "bucket": {" training-data "},
+		"prefix": {"ckpt/\r\nlogs, old/\n"}, "limit": {"2000"}, "unit": {"second"}, "burst": {"4000"}, "per": {"access_key", "bucket"}, "note": {"agreed <with> the tenant"},
+	}, http.StatusOK, "Rule uploads is set and on its way to every Envoy.", `<span class="name">uploads</span>`,
+		"At most 2000 PutObject, UploadPart calls per second from access keys AKIAEXAMPLE1 and AKIAEXAMPLE2, to bucket training-data, under prefixes ckpt/ and logs, old/, for each access key and each bucket, across the fleet.",
+		"Up to 4000 may pass at once.", "Note: agreed &lt;with&gt; the tenant", "Nothing matches it now", `hx-confirm="Remove rule uploads?`)
+	rules := getJSON[rulesResponse](t, s, "/api/v1/rules").Rules
+	if len(rules) != 1 || strings.Join(rules[0].Prefix, "|") != "ckpt/|logs, old/" || rules[0].Burst != 4000 || rules[0].LimitPerSecond != 2000 {
+		t.Fatalf("the rule as the API has it: %+v", rules)
+	}
+	submit("a blocked rule", url.Values{"name": {"no-deletes"}, "operation": {"DeleteObject"}, "bucket": {"archive"}, "blocked": {"true"}, "respond": {"429"}, "limit": {""}, "unit": {"second"}},
+		http.StatusOK, "All DeleteObject calls to bucket archive are refused with 429 TooManyRequests.")
+	submit("per hour", url.Values{"name": {"listings"}, "operation": {"List*"}, "limit": {"0.5"}, "unit": {"minute"}, "per": {"total"}},
+		http.StatusOK, "At most 0.5 List* calls per minute, in total across the fleet.")
+
+	// A form that cannot be a rule comes back open, as it was typed, with
+	// the daemon's reason.
+	body := submit("no per", url.Values{"name": {"bad"}, "operation": {"GetObject"}, "limit": {"5"}, "unit": {"hour"}, "prefix": {"a/\nb/"}, "note": {"keep me"}},
+		http.StatusUnprocessableEntity, `role="alert"`, "say what the limit is counted per", `name="name" required pattern="[A-Za-z0-9_.\-]{1,64}" value="bad"`,
+		`name="operation" value="GetObject"`, `<option value="hour" selected>`, `value="keep me"`, "a/\nb/</textarea>")
+	if !regexp.MustCompile(`<details class="more" hx-morph-skip open>\s*<summary>Add or replace a rule`).MatchString(body) {
+		t.Error("the refused form should be shown open")
+	}
+	submit("no limit", url.Values{"name": {"bad"}, "limit": {""}, "per": {"total"}}, http.StatusUnprocessableEntity, "Limit: enter how many requests")
+	submit("an unknown operation", url.Values{"name": {"bad"}, "operation": {"WRITE"}, "limit": {"5"}, "per": {"total"}}, http.StatusUnprocessableEntity, "not an S3 operation")
+	if n := len(getJSON[rulesResponse](t, s, "/api/v1/rules").Rules); n != 3 {
+		t.Errorf("refused forms left %d rules, want 3", n)
+	}
+
+	// What Envoys report shows on both pages.
+	s.quota.SetRules(s.store.Rules())
+	_, _, home = page(t, s, "/")
+	mustContain(t, "overview with idle rules", home, "Nothing refused", "by 3 rules")
+
+	code, body := post(t, s, "/controls/rules/remove", url.Values{"name": {"listings"}})
+	if code != http.StatusOK || !strings.Contains(body, "Rule listings removed.") || strings.Contains(body, `<span class="name">listings</span>`) {
+		t.Errorf("removing a rule: %d", code)
+	}
+	if code, body := post(t, s, "/controls/rules/remove", url.Values{"name": {"listings"}}); code != http.StatusUnprocessableEntity || !strings.Contains(body, "no rule") {
+		t.Errorf("removing it again: %d", code)
+	}
+	// The live stream carries the rules too.
+	ev := liveStream(t, s, "/live/controls")
+	mustContain(t, "live controls", ev.next(), "Request-rate rules", `<span class="name">uploads</span>`, `<span class="name">no-deletes</span>`)
+}

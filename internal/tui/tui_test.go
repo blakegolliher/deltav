@@ -304,6 +304,44 @@ func TestAboutLimits(t *testing.T) {
 	expect(t, screen(m), "VAST clusters", "Targets")
 }
 
+// Rate rules: listed on Controls with what Envoys report, and called out on
+// the Overview while they are refusing requests.
+func TestRateRulesViews(t *testing.T) {
+	m := sample()
+	m.height = 60
+	press(m, "4")
+	expect(t, screen(m), "Rate rules", `none: add one with "deltav rule set"`)
+
+	uploads := RuleStatus{Limit: "2000 per second", Sentence: "At most 2000 PutObject calls per second, for each access key, across the fleet."}
+	uploads.Name, uploads.Per = "uploads", []string{"access_key"}
+	uploads.Status.AllowedRate, uploads.Status.DeniedRate, uploads.Status.Keys, uploads.Status.Envoys = 1840, 312.4, 3, 7
+	blocked := RuleStatus{Limit: "blocked", Sentence: "All DeleteObject calls to bucket archive are refused with 503 SlowDown."}
+	blocked.Name = "no-deletes"
+	m.rules = []RuleStatus{uploads, blocked}
+	s := screen(m)
+	expect(t, s, "RULE", "LIMIT", "PER", "KEYS", "ALLOWED/S", "REFUSED/S", "ENVOYS",
+		"uploads: At most 2000 PutObject calls per second", "no-deletes: All DeleteObject calls to bucket archive are refused")
+	rows := map[string]string{}
+	for _, line := range strings.Split(s, "\n") {
+		if f := strings.Fields(line); len(f) > 3 && (f[0] == "uploads" || f[0] == "no-deletes") && !strings.HasSuffix(f[0], ":") {
+			rows[f[0]] = strings.Join(f[1:], " ")
+		}
+	}
+	if rows["uploads"] != "2000 per second access_key 3 1.8k 312 7" || rows["no-deletes"] != "blocked - 0 0 0 0" {
+		t.Errorf("rule rows: %q", rows)
+	}
+	m.width, m.height = 80, 60
+	expect(t, fits(t, m, "controls with rules at 80 columns"), "RULE", "REFUSED/S", "uploads")
+
+	m.width = 160
+	press(m, "1")
+	if strings.Contains(screen(m), "Rate rules are refusing") {
+		t.Error("the overview says rules are refusing when none is")
+	}
+	m.overview.RateRules = apiclient.RateRules{Rules: 2, AllowedRate: 1840, DeniedRate: 312.4, Refusing: []string{"uploads"}}
+	expect(t, screen(m), "Rate rules are refusing 312 requests a second (uploads); 1.8k a second pass them.")
+}
+
 // What an enforced limit cannot do is said in full on the Controls view.
 func TestControlsCaveats(t *testing.T) {
 	m := sample()

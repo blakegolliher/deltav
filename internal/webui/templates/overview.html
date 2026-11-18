@@ -55,6 +55,18 @@
     <p class="tile-note">{{badge "good" "All within their limits"}}</p>
     {{end}}
   </div>
+  <div class="tile">
+    <h2 class="tile-label">Refused by rate rules, per second</h2>
+    <p class="tile-value">{{rate .RateRules.DeniedRate}}</p>
+    {{if not .RateRules.Rules}}
+    <p class="tile-note">No rate rules. Add one under <a href="/controls">Controls</a>.</p>
+    {{else if .RateRules.Refusing}}
+    <p class="tile-note">{{badge "warn" "Refusing"}} {{join .RateRules.Refusing ", "}}</p>
+    <p class="tile-note">{{rate .RateRules.AllowedRate}} per second pass the rules</p>
+    {{else}}
+    <p class="tile-note">{{badge "good" "Nothing refused"}} by {{.RateRules.Rules}} {{if eq .RateRules.Rules 1}}rule{{else}}rules{{end}}</p>
+    {{end}}
+  </div>
 </section>
 
 <section class="card" aria-labelledby="targets-title">

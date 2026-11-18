@@ -227,6 +227,14 @@ func (m *Model) overviewView() ([]string, int) {
 		return []string{styleDim.Render("Waiting for the daemon…")}, -1
 	}
 	out := append(wrap(m.fleetLine(), m.width), "")
+	if rr := m.overview.RateRules; rr.DeniedRate > 0 {
+		line := fmt.Sprintf("Rate rules are refusing %s requests a second (%s); %s a second pass them.",
+			rate(rr.DeniedRate), strings.Join(rr.Refusing, ", "), rate(rr.AllowedRate))
+		for _, l := range wrap(line, m.width) {
+			out = append(out, styleWarn.Render(l))
+		}
+		out = append(out, "")
+	}
 	if len(m.overview.Targets) == 0 {
 		return append(out, "No targets yet.", "",
 			styleDim.Render("Attach a VAST cluster and add a target:"),
@@ -405,7 +413,8 @@ var aboutLimits = []string{
 	"The cap is each Envoy's own, which is why the limit is divided: once Envoys × VIPs × worker threads is more than the limit, no cap can hold it.",
 	"Changing the cap makes Envoys reconnect, so as Envoys come and go a new cap is held back until it differs enough. A limit you set here is sent at once.",
 	"Drain withholds a CNode's VIPs from every Envoy until it is undrained. Nothing changes on the VAST cluster.",
-	"Clusters and targets are added and removed with \"deltav vast\" and \"deltav target\".",
+	"A rate rule limits requests per second, by S3 operation, access key, bucket or prefix. Its rate is the whole fleet's: the daemon divides it among the Envoys using it and follows a change in who is asking within about 5 seconds. Refused requests get 503 SlowDown.",
+	"Clusters, targets and rate rules are added and removed with \"deltav vast\", \"deltav target\" and \"deltav rule\".",
 }
 
 func (m *Model) controlsView() ([]string, int) {
@@ -531,6 +540,29 @@ func (m *Model) controlsView() ([]string, int) {
 		cols, rows, _ := fit([]column{{"CNODE", false}, {"STATE", false}, {"VIPS", true}, {"IN FLIGHT", true}, {"OF LIMIT", false}},
 			rows, m.width, []string{"VIPS"})
 		out = append(out, table(cols, rows, selected, m.width)...)
+	}
+	out = append(out, "", styleHead.Render("Rate rules"))
+	if len(m.rules) == 0 {
+		out = append(out, styleDim.Render("  none: add one with \"deltav rule set\""))
+	} else {
+		var rows [][]string
+		for _, r := range m.rules {
+			per := strings.Join(r.Per, ", ")
+			if per == "" {
+				per = "-"
+			}
+			refused := rate(r.Status.DeniedRate)
+			if r.Status.DeniedRate > 0 {
+				refused = styleWarn.Render(refused)
+			}
+			rows = append(rows, []string{r.Name, r.Limit, per, fmt.Sprint(r.Status.Keys), rate(r.Status.AllowedRate), refused, fmt.Sprint(r.Status.Envoys)})
+		}
+		cols, rows, _ := fit([]column{{"RULE", false}, {"LIMIT", false}, {"PER", false}, {"KEYS", true}, {"ALLOWED/S", true}, {"REFUSED/S", true}, {"ENVOYS", true}},
+			rows, m.width, []string{"ENVOYS", "KEYS", "PER"})
+		out = append(out, table(cols, rows, -1, m.width)...)
+		for _, r := range m.rules {
+			out = append(out, dim(r.Name+": "+r.Sentence, min(m.width, 110))...)
+		}
 	}
 	if len(caveats) > 0 {
 		out = append(out, "")

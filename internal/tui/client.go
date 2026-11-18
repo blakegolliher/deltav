@@ -24,4 +24,5 @@ type (
 	Cluster      = apiclient.Cluster
 	FleetQuery   = apiclient.FleetQuery
 	Event        = apiclient.Event
+	RuleStatus   = apiclient.RuleStatus
 )

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"deltav/internal/apiclient"
+	"deltav/internal/ratelimit"
 )
 
 // The four pages' views: what each asks the API for and how it lays the
@@ -84,6 +85,7 @@ type overviewView struct {
 	History                      []float64
 	Limits                       int // targets with a limit
 	Over                         []apiclient.Usage
+	RateRules                    apiclient.RateRules
 }
 
 func (u *UI) buildOverview(ctx context.Context, v *view) error {
@@ -93,7 +95,7 @@ func (u *UI) buildOverview(ctx context.Context, v *view) error {
 	if err != nil {
 		return err
 	}
-	ov.ConfigVersion, ov.Fleet = o.ConfigVersion, o.Fleet
+	ov.ConfigVersion, ov.Fleet, ov.RateRules = o.ConfigVersion, o.Fleet, o.RateRules
 	// The targets list adds what the overview leaves out: where a target
 	// comes from and how its pool resolved.
 	infos, infoErr := u.api.Targets(ctx)
@@ -370,11 +372,21 @@ type controlsCluster struct {
 	Targets int // targets that use it; it cannot be detached while any do
 }
 
+// ruleForm is the add-a-rule form's fields as they were typed.
+type ruleForm struct {
+	Name, Operation, AccessKey, Bucket, Prefix string
+	Limit, Unit, Burst, Respond, Note          string
+	Blocked                                    bool
+	Per                                        map[string]bool
+}
+
 type controlsView struct {
 	Settings apiclient.Settings
 	Targets  []apiclient.TargetInfo
 	Clusters []controlsCluster
 	CNodes   []apiclient.CNode
+	Rules    []apiclient.RuleStatus
+	NewRule  ruleForm
 	// What a failed form held, so it need not be typed again. A password is
 	// never among it.
 	NewCluster apiclient.NewCluster
@@ -420,6 +432,9 @@ func (u *UI) buildControls(ctx context.Context, v *view) error {
 	} else {
 		cv.CNodes = res.CNodes
 	}
+	cv.Rules, err = u.api.Rules(ctx)
+	keep(err)
+	cv.NewRule = ruleForm{Unit: "second", Respond: "503", Per: map[string]bool{}}
 	return first
 }
 
@@ -511,7 +526,14 @@ func (u *UI) funcs() template.FuncMap {
 		"sum":         func(a, b float64) float64 { return a + b },
 		"deref":       func(t *time.Time) time.Time { return *t },
 		"less1":       func(n int) int { return max(n, 1) - 1 },
-		"percent":     func(f float64) string { return strconv.FormatFloat(f*100, 'f', -1, 64) + "%" },
+		"join":        strings.Join,
+		"first": func(n int, keys []ratelimit.KeyStatus) []ratelimit.KeyStatus {
+			if len(keys) > n {
+				return keys[:n]
+			}
+			return keys
+		},
+		"percent": func(f float64) string { return strconv.FormatFloat(f*100, 'f', -1, 64) + "%" },
 		"seconds": func(s float64) string {
 			if s >= 120 && s == float64(int(s/60))*60 {
 				return fmt.Sprintf("%d minutes", int(s/60))

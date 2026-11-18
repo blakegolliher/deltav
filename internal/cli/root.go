@@ -73,6 +73,7 @@ func NewRoot(name string) *cobra.Command {
 		newFleetCmd(),
 		newNodeCmd(),
 		newLimitCmd(),
+		newRuleCmd(),
 		newBootstrapCmd(),
 		newUnitCmd(),
 	)

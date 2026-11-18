@@ -132,6 +132,8 @@ func New(o Options) (*UI, error) {
 	mux.HandleFunc("POST /controls/clusters/remove", u.action(u.removeCluster))
 	mux.HandleFunc("POST /controls/targets", u.action(u.addTarget))
 	mux.HandleFunc("POST /controls/targets/remove", u.action(u.removeTarget))
+	mux.HandleFunc("POST /controls/rules", u.action(u.setRule))
+	mux.HandleFunc("POST /controls/rules/remove", u.action(u.removeRule))
 	u.mux = mux
 	return u, nil
 }

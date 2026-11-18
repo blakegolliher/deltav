@@ -183,11 +183,21 @@ type targetOverview struct {
 	Over  []cnodeUsage `json:"over,omitempty"`
 }
 
+// rateRulesOverview sums up the request-rate rules: how much they are
+// letting through and refusing, as of the Envoys' last reports.
+type rateRulesOverview struct {
+	Rules       int      `json:"rules"`
+	AllowedRate float64  `json:"allowed_rate"`
+	DeniedRate  float64  `json:"denied_rate"`
+	Refusing    []string `json:"refusing"` // rules refusing requests now
+}
+
 type overviewResponse struct {
-	ConfigVersion string           `json:"config_version"`
-	Window        string           `json:"window"`
-	Fleet         fleetCounts      `json:"fleet"`
-	Targets       []targetOverview `json:"targets"`
+	ConfigVersion string            `json:"config_version"`
+	Window        string            `json:"window"`
+	Fleet         fleetCounts       `json:"fleet"`
+	Targets       []targetOverview  `json:"targets"`
+	RateRules     rateRulesOverview `json:"rate_rules"`
 }
 
 func (s *Server) overview(win metrics.Window) overviewResponse {
@@ -216,6 +226,17 @@ func (s *Server) overview(win metrics.Window) overviewResponse {
 			}
 		}
 		resp.Targets = append(resp.Targets, o)
+	}
+	resp.RateRules.Refusing = []string{}
+	status, _ := s.quota.Status()
+	for _, r := range s.store.Rules() {
+		st := status[r.Name]
+		resp.RateRules.Rules++
+		resp.RateRules.AllowedRate += st.AllowedRate
+		resp.RateRules.DeniedRate += st.DeniedRate
+		if st.DeniedRate > 0 {
+			resp.RateRules.Refusing = append(resp.RateRules.Refusing, r.Name)
+		}
 	}
 	return resp
 }

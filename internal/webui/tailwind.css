@@ -100,6 +100,7 @@
   .input { @apply h-8 rounded-md border border-rule bg-surface px-2.5 text-sm text-ink; }
   .input::placeholder { color: var(--dv-ink-3); }
   .input-num { @apply w-32 tabular-nums; }
+  .input-area { @apply h-auto py-1.5 font-mono; }
   .seg { @apply inline-flex rounded-md border border-line bg-surface p-0.5; }
   .seg a { @apply rounded px-2.5 py-1 text-xs text-ink-2 hover:text-ink; }
   .seg a[aria-current="true"] { @apply bg-sunken font-semibold text-ink; }

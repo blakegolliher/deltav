@@ -260,14 +260,14 @@ func (r *Rule) Limit() string {
 	return n + " per " + unit
 }
 
-func oneOf(noun string, values []string) string {
+func oneOf(noun, plural string, values []string) string {
 	if len(values) == 1 {
 		return noun + " " + values[0]
 	}
 	if len(values) <= 3 {
-		return noun + "s " + strings.Join(values[:len(values)-1], ", ") + " and " + values[len(values)-1]
+		return plural + " " + strings.Join(values[:len(values)-1], ", ") + " and " + values[len(values)-1]
 	}
-	return fmt.Sprintf("%d %ss", len(values), noun)
+	return fmt.Sprintf("%d %s", len(values), plural)
 }
 
 // Sentence says what the rule does in one or two sentences, for a person
@@ -283,13 +283,13 @@ func (r *Rule) Sentence() string {
 	}
 	var only []string
 	if len(r.AccessKey) > 0 {
-		only = append(only, "from "+oneOf("access key", r.AccessKey))
+		only = append(only, "from "+oneOf("access key", "access keys", r.AccessKey))
 	}
 	if len(r.Bucket) > 0 {
-		only = append(only, "to "+oneOf("bucket", r.Bucket))
+		only = append(only, "to "+oneOf("bucket", "buckets", r.Bucket))
 	}
 	if len(r.Prefix) > 0 {
-		only = append(only, "under "+oneOf("prefix", r.Prefix))
+		only = append(only, "under "+oneOf("prefix", "prefixes", r.Prefix))
 	}
 	scope := ""
 	if len(only) > 0 {

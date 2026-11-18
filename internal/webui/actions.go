@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"deltav/internal/apiclient"
+	"deltav/internal/ratelimit"
 )
 
 // The Controls page's forms. Each handler turns a posted form into one API
@@ -40,6 +41,9 @@ func (u *UI) action(do actionFunc) http.HandlerFunc {
 			status = http.StatusUnprocessableEntity
 			v.Flash = &flash{Text: err.Error()}
 			v.Controls.NewCluster, v.Controls.NewTarget, v.Controls.OpenForm = echo.Controls.NewCluster, echo.Controls.NewTarget, echo.Controls.OpenForm
+			if echo.Controls.OpenForm == "rule" {
+				v.Controls.NewRule = echo.Controls.NewRule
+			}
 		} else {
 			v.Flash = &flash{OK: true, Text: done}
 		}
@@ -154,4 +158,76 @@ func (u *UI) removeTarget(ctx context.Context, form url.Values, _ *view) (string
 		return "", err
 	}
 	return fmt.Sprintf("Target %s removed. Envoys close its listener.", name), nil
+}
+
+// list splits a field of comma-separated values.
+func list(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (u *UI) setRule(ctx context.Context, form url.Values, v *view) (string, error) {
+	f := ruleForm{
+		Name: field(form, "name"), Operation: field(form, "operation"), AccessKey: field(form, "access_key"), Bucket: field(form, "bucket"),
+		Prefix: form.Get("prefix"), Limit: field(form, "limit"), Unit: field(form, "unit"), Burst: field(form, "burst"),
+		Respond: field(form, "respond"), Note: field(form, "note"), Blocked: form.Get("blocked") == "true", Per: map[string]bool{},
+	}
+	for _, p := range form["per"] {
+		f.Per[p] = true
+	}
+	fail := func(err error) (string, error) {
+		v.Controls.NewRule, v.Controls.OpenForm = f, "rule"
+		return "", err
+	}
+	r := ratelimit.Rule{
+		Name: f.Name, Operation: list(f.Operation), AccessKey: list(f.AccessKey), Bucket: list(f.Bucket),
+		Blocked: f.Blocked, Per: form["per"], Note: f.Note,
+	}
+	// One prefix to a line: a prefix may hold a comma.
+	for _, line := range strings.Split(strings.ReplaceAll(f.Prefix, "\r", ""), "\n") {
+		if line != "" {
+			r.Prefix = append(r.Prefix, line)
+		}
+	}
+	if !f.Blocked {
+		n, err := strconv.ParseFloat(f.Limit, 64)
+		if err != nil || n <= 0 {
+			return fail(errors.New("Limit: enter how many requests, a number above 0, or tick Refuse everything"))
+		}
+		switch f.Unit {
+		case "minute":
+			r.LimitPerMinute = n
+		case "hour":
+			r.LimitPerHour = n
+		default:
+			r.LimitPerSecond = n
+		}
+	}
+	if f.Burst != "" {
+		n, err := number(form, "burst", "Burst", 1, 1<<32-1)
+		if err != nil {
+			return fail(err)
+		}
+		r.Burst = uint32(n)
+	}
+	if f.Respond == "429" {
+		r.Respond = 429
+	}
+	if err := u.api.SetRule(ctx, r); err != nil {
+		return fail(err)
+	}
+	return fmt.Sprintf("Rule %s is set and on its way to every Envoy.", r.Name), nil
+}
+
+func (u *UI) removeRule(ctx context.Context, form url.Values, _ *view) (string, error) {
+	name := field(form, "name")
+	if err := u.api.RemoveRule(ctx, name); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Rule %s removed.", name), nil
 }

@@ -72,7 +72,8 @@ type Model struct {
 	targets  []TargetInfo
 	clusters []Cluster
 	control  []CNode // the CNodes listed on the Controls view
-	loaded   bool    // controls data has arrived at least once
+	rules    []RuleStatus
+	loaded   bool // controls data has arrived at least once
 
 	// Controls: at most one of these is in progress.
 	editing *limitEdit    // typing a target's limit
@@ -134,6 +135,7 @@ type (
 		targets  []TargetInfo
 		clusters []Cluster
 		cnodes   []CNode
+		rules    []RuleStatus
 		err      error
 	}
 	// actionMsg reports a change made from the Controls view.
@@ -204,7 +206,11 @@ func (m *Model) fetch(withOverview bool) tea.Cmd {
 			if err != nil {
 				return controlsMsg{err: err}
 			}
-			return controlsMsg{targets, clusters, cnodes.CNodes, nil}
+			rules, err := api.Rules(ctx)
+			if err != nil {
+				return controlsMsg{err: err}
+			}
+			return controlsMsg{targets, clusters, cnodes.CNodes, rules, nil}
 		})
 	}
 	return tea.Batch(cmds...)
@@ -296,7 +302,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case controlsMsg:
 		if m.fail(msg.err); msg.err == nil {
-			m.targets, m.clusters, m.control, m.loaded = msg.targets, msg.clusters, msg.cnodes, true
+			m.targets, m.clusters, m.control, m.rules, m.loaded = msg.targets, msg.clusters, msg.cnodes, msg.rules, true
 		}
 	case actionMsg:
 		m.fail(msg.err)

@@ -302,6 +302,66 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     shows each Envoy's declared worker threads. Checked by running the binary in tmux against
     the daemon with three real Envoys under load, at 80×24 and 150×40.
 
+### After the milestones: request-rate rules
+
+Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the build prompt.
+
+44. **The rules are tollbooth's; the rate is the fleet's.** A rule's vocabulary and semantics
+    are tollbooth 0.1.0's: filters on operation, access key, bucket and prefix; a limit per
+    second, minute or hour with a burst, or `blocked`; `per`; `respond` 503 or 429; every
+    matching rule must allow; the same table decides which S3 operation a request is. What
+    cannot be the same is the division. Tollbooth's nodes sit behind a balancer that spreads a
+    tenant's traffic evenly, so each node enforces `rate / node_count`. Here an Envoy sits on
+    every client host, and an access key is typically busy on a few of them: an even split would
+    give each a sliver. So a rule's rate belongs to the whole fleet and is divided by demand
+    (amendment 46). `per: client` gives each client host the whole rate; it stands where
+    tollbooth has `source_ip`, which means nothing when the source is always loopback.
+45. **How a request is limited.** In each listener, ahead of the router: a Lua filter, then one
+    rate limit quota filter per rule (`internal/xds/ratelimit.go`). The Lua script is generated
+    from the rules (`internal/ratelimit/lua.go`): it finds the operation, the access key, the
+    bucket and the key, decides which rules match, and for each sets a request header naming
+    what that rule counts the request under. A rule's quota filter matches requests that carry
+    its header and counts them in the bucket `{rule, key}`. One filter per rule because a quota
+    filter puts a request in one bucket only, and every matching rule must allow. The headers
+    are removed before VAST; any a client sends are dropped first, so a client cannot pick its
+    own count. Rule values reach the script as byte-escaped literals. A script error lets the
+    request through.
+46. **How the rate is divided.** Envoy's quota filter reports, per bucket, requests allowed and
+    refused, and takes a token bucket in return, over one gRPC stream to the daemon
+    (`internal/ratelimit/server.go`). No request waits on it. For each bucket the daemon
+    divides the rule's rate among the Envoys that have it open: what each asks for (allowed
+    plus refused per second) while that fits, an even split among the largest askers when it
+    does not, and for an Envoy that asks for nothing a quarter of an even share, so its next
+    request is not refused for want of any (`Divide`, max-min fair). The burst is divided in
+    proportion. A share that changes by more than a tenth is pushed without waiting for that
+    Envoy's next report.
+47. **Envoy 1.40 as found** (source read at v1.40.2; the second and third were also hit).
+    Usage is reported every 5 s whatever `reporting_interval` says, so that is how fast shares
+    follow demand. A token bucket's `fill_interval` is read in whole seconds: half a second
+    becomes zero and the rate unlimited, so rates are written as tokens per 1, 10, 100, 1000 or
+    3600 s. A token bucket given as the behaviour before the first assignment is used with no
+    limiter behind it; that behaviour must be allow-all or deny-all. `RequestsPerTimeUnit`
+    assignments are not implemented. The filter and `RateLimitStrategy` are marked
+    work-in-progress upstream and Envoy logs a warning saying so.
+48. **Failing open.** A new bucket lets requests through until the daemon's first answer, a
+    matter of milliseconds. A share lasts 20 s and is renewed every 5. If the daemon is gone,
+    each Envoy then applies a rule's whole rate by itself for ten minutes, and after that the
+    rule is not enforced until the daemon returns. Past 100,000 keys for one rule, new keys are
+    not limited. Blocked rules refuse in all of these states. Tollbooth's reason holds here: a
+    limiter that takes storage away when it is unwell is worse than none.
+49. **Seen against real Envoy** (2026-11-18, two worker threads each): 20 GetObject per second
+    per access key let 142 through in 6 s and refused 11,266 with `503 SlowDown`, `Retry-After:
+    1` and S3's error document, while PUTs passed untouched; a second Envoy on the same port,
+    and the two together let 259 through in 12 s; the rate raised under load, with no failed
+    request; a blocked rule refused everything with the status it names; the backend never saw
+    the script's headers; with the rules removed traffic was byte-exact again.
+50. **Not built, or not as tollbooth has it.** `Retry-After` is always 1: the wait is not known
+    where the answer is made. The error document has no `Resource` or `RequestId`. No
+    `source_ip` filter, no `rules test`, no observe-only rules. Virtual-host-style requests
+    are not recognized (clients of a loopback address use path-style). Adding or removing a
+    rule changes every listener's filter chain; changing one changes a filter's settings.
+    Envoy's own memory of buckets is bounded only by the daemon abandoning idle ones.
+
 ## Known gaps (POC)
 
 mTLS on the xDS and telemetry streams; daemon HA; per-group targeting of Envoys; long-term metric
