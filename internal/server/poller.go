@@ -47,8 +47,11 @@ type targetStatus struct {
 	Healthy int `json:"healthy"` // of those, on a healthy CNode
 	// Drained counts VIPs on a healthy CNode that are withheld because an
 	// operator drained that CNode.
-	Drained int    `json:"drained,omitempty"`
-	Problem string `json:"problem,omitempty"` // why it could not be resolved
+	Drained int `json:"drained,omitempty"`
+	// Unusable counts VIPs left out because VAST gave an address for them
+	// that is not an IP address.
+	Unusable int    `json:"unusable,omitempty"`
+	Problem  string `json:"problem,omitempty"` // why it could not be resolved
 	// Held is true while the endpoints served are the last known ones and
 	// not what the latest poll said (or there has been no poll yet).
 	Held  bool         `json:"held,omitempty"`
@@ -104,6 +107,7 @@ type poller struct {
 	views    map[string]*clusterView
 	served   map[string][]xds.Endpoint // per VAST target: endpoints now served
 	empty    map[string]int            // per VAST target: polls in a row without endpoints
+	emptyAt  map[string]time.Time      // per VAST target: the poll last counted in empty
 	status   map[string]targetStatus
 	debounce map[string]*limit.Debouncer // per VAST target: the enforced share
 	now      func() time.Time
@@ -120,7 +124,7 @@ func newPoller(s *Server, interval time.Duration) *poller {
 	p := &poller{
 		s: s, interval: interval, kick: make(chan struct{}, 1),
 		apis: map[string]apiEntry{}, views: map[string]*clusterView{},
-		served: map[string][]xds.Endpoint{}, empty: map[string]int{}, status: map[string]targetStatus{},
+		served: map[string][]xds.Endpoint{}, empty: map[string]int{}, emptyAt: map[string]time.Time{}, status: map[string]targetStatus{},
 		debounce: map[string]*limit.Debouncer{}, now: time.Now,
 		minChange: s.cfg.LimitMinChange, minInterval: s.cfg.LimitMinInterval,
 	}
@@ -297,6 +301,13 @@ func resolve(t state.Target, v *clusterView, drained map[string]bool) ([]xds.End
 			continue
 		}
 		st.VIPs++
+		// An address Envoy could not be given is left out, and the rest
+		// of the pool served. Passed on, it would fail the whole snapshot:
+		// no target could change, nor any rule, until VAST stopped saying it.
+		if net.ParseIP(vip.IP) == nil {
+			st.Unusable++
+			continue
+		}
 		// A VIP on a CNode that is not in service, or on one the cluster
 		// did not list, is left out.
 		if c, ok := cnodes[vip.CNode]; ok && c.Healthy() {
@@ -369,7 +380,14 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 				// not an odd answer from VAST. It takes effect now.
 				p.empty[t.Name] = 0
 			default:
-				if p.empty[t.Name]++; had && len(prev) > 0 && p.empty[t.Name] < emptyHold {
+				// Count polls, not calls: an operator's command also brings
+				// us here, any number of times between two polls, and each
+				// sees the same answer from VAST.
+				if !view.At.Equal(p.emptyAt[t.Name]) {
+					p.empty[t.Name]++
+					p.emptyAt[t.Name] = view.At
+				}
+				if had && len(prev) > 0 && p.empty[t.Name] < emptyHold {
 					eps, st.Held = prev, true
 				}
 			}
@@ -414,6 +432,7 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 		if !known[name] {
 			delete(p.status, name)
 			delete(p.empty, name)
+			delete(p.emptyAt, name)
 			delete(p.debounce, name)
 		}
 	}

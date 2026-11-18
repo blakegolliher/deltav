@@ -351,6 +351,20 @@ func TestTargetsFollowTheCluster(t *testing.T) {
 		if tj = target(t, s, "s3"); len(tj.Endpoints) != 6 || !tj.Status.Held || tj.Status.VIPs != 0 {
 			t.Errorf("poll %d after the pool emptied: %d endpoints, status %+v", poll, len(tj.Endpoints), tj.Status)
 		}
+		// It is polls that are counted. An operator's commands rebuild the
+		// config too, any number of times between two polls, and each sees
+		// the same one answer from VAST: they must not use the hold up.
+		for i := 0; i < 4; i++ {
+			if code, body := call(t, s, "PUT", "/api/v1/rules/meanwhile", map[string]any{"limit_per_second": 5 + i, "per": []string{"total"}}); code != 200 {
+				t.Fatalf("setting a rule: %d %s", code, body)
+			}
+		}
+		if code, _ := call(t, s, "DELETE", "/api/v1/rules/meanwhile", nil); code != 204 {
+			t.Fatalf("removing a rule: %d", code)
+		}
+		if tj = target(t, s, "s3"); len(tj.Endpoints) != 6 || !tj.Status.Held {
+			t.Errorf("after poll %d and five commands: %d endpoints, status %+v", poll, len(tj.Endpoints), tj.Status)
+		}
 	}
 	s.poller.pollOnce(ctx)
 	if tj = target(t, s, "s3"); len(tj.Endpoints) != 0 || tj.Status.Held {
@@ -364,6 +378,38 @@ func TestTargetsFollowTheCluster(t *testing.T) {
 		if _, body := call(t, s, "GET", path, nil); strings.Contains(body, vasttest.Password) {
 			t.Errorf("%s contains the cluster password", path)
 		}
+	}
+}
+
+// One address from VAST that is not an address costs that VIP, and nothing
+// else: the rest of the pool is served, other targets and rules can still
+// change, and the target says what it left out.
+func TestUnusableVIPAddress(t *testing.T) {
+	m := mockVAST(t)
+	s, _ := run(t, t.TempDir())
+	addCluster(t, s, m)
+	ctx := context.Background()
+	addTarget(t, s, "s3", "main", 9000)
+	if err := m.SetPoolVIPs("main", []string{"192.0.2.1", "192.0.2.2", "not-an-address", "192.0.2.4", "", "2001:db8::6"}); err != nil {
+		t.Fatal(err)
+	}
+	s.poller.pollOnce(ctx)
+	tj := target(t, s, "s3")
+	if len(tj.Endpoints) != 4 || tj.Status.VIPs != 6 || tj.Status.Unusable != 2 || tj.Status.Problem != "" || tj.Status.Held {
+		t.Fatalf("with two addresses that are not addresses: %d endpoints, status %+v", len(tj.Endpoints), tj.Status)
+	}
+	for _, e := range tj.Endpoints {
+		if e.IP == "not-an-address" || e.IP == "" {
+			t.Errorf("served %+v", e)
+		}
+	}
+	// What used to follow: nothing could be served, so nothing could change.
+	before := s.XDS().Version()
+	if code, body := call(t, s, "PUT", "/api/v1/rules/still-works", map[string]any{"limit_per_second": 5, "per": []string{"total"}}); code != 200 {
+		t.Errorf("setting a rule: %d %s", code, body)
+	}
+	if s.XDS().Version() == before {
+		t.Error("a rule change was not served")
 	}
 }
 
