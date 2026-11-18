@@ -295,6 +295,32 @@ func TestSanitizeReport(t *testing.T) {
 	}
 }
 
+// An object keyed by an address or a name gives the report a path made of
+// that key. The path is the key as it was rewritten, not as it came.
+func TestSanitizeReportOfKeyedObjects(t *testing.T) {
+	doc := decodeDoc(t, `{"10.20.30.41": {"state": "ACTIVE"}, "10.20.30.42": {"state": "ACTIVE"}, "plain": {"state": "x"}}`)
+	out, report, err := NewSanitizer("vms.acme.example").Sanitize(map[string]any{"by_address": doc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := map[string]bool{}
+	for _, r := range report {
+		paths[r.Path] = true
+		if strings.Contains(r.Path, "10.20.30.") {
+			t.Errorf("the report has a real address in a path: %q", r.Path)
+		}
+	}
+	keyed := out["by_address"].(map[string]any)
+	if len(keyed) != 3 || !paths[".plain.state"] {
+		t.Fatalf("sanitized %v, report paths %v", keyed, paths)
+	}
+	for k := range keyed {
+		if !paths["."+k+".state"] {
+			t.Errorf("no report row for the key %q as it was written out: %v", k, paths)
+		}
+	}
+}
+
 func TestSanitizeAddressEdgeCases(t *testing.T) {
 	doc := decodeDoc(t, `{
 	  "range": "10.1.1.5-10.1.1.9", "cidr": "10.1.1.0/24", "with_port": "10.1.1.5:443",

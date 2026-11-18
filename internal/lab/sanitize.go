@@ -286,9 +286,11 @@ func (s *Sanitizer) walk(doc, path, field string, v any, stats map[string]*field
 		note("object", "", "")
 		out := make(map[string]any, len(x))
 		for k, child := range x {
-			// A key can itself be an address or a name of the cluster.
+			// A key can itself be an address or a name of the cluster. The
+			// report's path is made from the key as it goes out, never as
+			// it came in: the report is meant to be safe to paste.
 			newKey, _ := s.inline(k, false)
-			out[newKey] = s.walk(doc, path+"."+k, k, child, stats)
+			out[newKey] = s.walk(doc, path+"."+newKey, k, child, stats)
 		}
 		return out
 	case []any:
