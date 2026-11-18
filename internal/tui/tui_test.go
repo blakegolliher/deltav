@@ -145,7 +145,7 @@ func sample() *Model {
 	// A limit on main, in enforce mode, with cnode-3-10 over it; and
 	// cnode-3-12 drained.
 	over := Usage{Target: "main", Cluster: "lab", CNode: "cnode-3-10", InFlight: 130, PerCNode: 100, Mode: "enforce", Over: true}
-	limit := &LimitStatus{PerCNode: 100, Mode: "enforce", Share: 5, Computed: 4, Envoys: 12, MaxVIPsPerCNode: 2}
+	limit := &LimitStatus{PerCNode: 100, Mode: "enforce", Share: 5, Computed: 4, Envoys: 12, MaxVIPsPerCNode: 2, Workers: 1, Holds: true}
 	m.overview.Targets[0].Limit, m.overview.Targets[0].Over = limit, []Usage{over}
 	m.cnodes.CNodes[0].Limits = []Usage{over}
 	m.cnodes.CNodes[1].Limits = []Usage{{Target: "main", Cluster: "lab", CNode: "cnode-3-11", InFlight: 0, PerCNode: 100}}

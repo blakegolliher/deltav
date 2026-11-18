@@ -3,12 +3,17 @@
 // about themselves.
 //
 // Envoy's per_host_thresholds.max_connections caps the connections one
-// Envoy opens to one endpoint, which is one VIP. Two facts follow.
+// Envoy opens to one endpoint, which is one VIP. Three facts follow.
 //
 // The threshold is local to each Envoy, so the fleet's limit has to be
 // divided among the Envoys; and it applies per VIP, with one value for the
 // whole cluster, so it has to be divided again by the largest number of the
 // target's VIPs that any one CNode hosts (DESIGN.md, amendment 1).
+//
+// The threshold leaks. Envoy lets a worker thread whose own pool to a host
+// is empty open one connection whatever the count, so an Envoy with W
+// workers can hold W - 1 more than the threshold; the share is reduced by
+// that much (amendments 34 and 40).
 //
 // The threshold lives on Envoy's Cluster resource, where a change makes
 // Envoy rebuild the cluster and reconnect its connection pools. The share
@@ -17,22 +22,38 @@ package limit
 
 import "time"
 
-// Share is the connections each Envoy may open to each VIP so that the
-// fleet stays at or under perCNode connections to any one CNode:
+// Share is the threshold to give every Envoy so that the fleet stays at or
+// under perCNode connections to any one CNode:
 //
-//	max(1, floor(perCNode / (envoys × maxVIPsPerCNode)))
+//	max(1, floor(perCNode / (envoys × maxVIPsPerCNode)) - (workers - 1))
+//
+// An Envoy with that threshold holds at most share + workers - 1 connections
+// to a VIP, which is the first term whenever the result is above 1.
 //
 // It is never below 1: an Envoy that may open no connection cannot serve.
-// Once envoys × maxVIPsPerCNode exceeds perCNode the fleet can therefore
-// exceed the limit, which alerting still reports. A perCNode of 0 means no
-// limit and gives 0, which Envoy takes as "no threshold". envoys and
-// maxVIPsPerCNode below 1 count as 1.
-func Share(perCNode uint32, envoys, maxVIPsPerCNode int) uint32 {
+// Once envoys × maxVIPsPerCNode × workers exceeds perCNode (see Holds) the
+// fleet can therefore exceed the limit, which alerting still reports. A
+// perCNode of 0 means no limit and gives 0, which Envoy takes as "no
+// threshold". envoys, maxVIPsPerCNode and workers below 1 count as 1.
+func Share(perCNode uint32, envoys, maxVIPsPerCNode, workers int) uint32 {
 	if perCNode == 0 {
 		return 0
 	}
 	divisor := uint64(max(envoys, 1)) * uint64(max(maxVIPsPerCNode, 1))
-	return uint32(max(uint64(perCNode)/divisor, 1))
+	each := uint64(perCNode) / divisor // connections one Envoy may hold to one VIP
+	leak := uint64(max(workers, 1) - 1)
+	if each <= leak {
+		return 1
+	}
+	return uint32(each - leak)
+}
+
+// Holds reports whether a fleet of this shape can be kept within perCNode
+// at all: whether even the smallest threshold, 1, at which each Envoy can
+// still hold `workers` connections to a VIP, keeps the total at or under
+// the limit.
+func Holds(perCNode uint32, envoys, maxVIPsPerCNode, workers int) bool {
+	return uint64(max(envoys, 1))*uint64(max(maxVIPsPerCNode, 1))*uint64(max(workers, 1)) <= uint64(perCNode)
 }
 
 // Defaults for a Debouncer.

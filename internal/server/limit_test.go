@@ -14,7 +14,9 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	"google.golang.org/protobuf/types/known/structpb"
 
+	"deltav/internal/fleet"
 	"deltav/internal/metrics"
 )
 
@@ -26,6 +28,15 @@ func connect(s *Server, from, to int) {
 		s.fleet.StreamOpen(id, "")
 		s.fleet.Request(id, &discoverygrpc.DiscoveryRequest{TypeUrl: resource.ClusterType, Node: &corev3.Node{Id: fmt.Sprintf("envoy-%03d", i)}})
 	}
+}
+
+// connectWorkers registers one Envoy that declares its worker threads in its
+// node metadata, as the client unit makes it do.
+func connectWorkers(s *Server, i, workers int) {
+	id := int64(5000 + i)
+	md, _ := structpb.NewStruct(map[string]any{fleet.WorkersMetadataKey: workers})
+	s.fleet.StreamOpen(id, "")
+	s.fleet.Request(id, &discoverygrpc.DiscoveryRequest{TypeUrl: resource.ClusterType, Node: &corev3.Node{Id: fmt.Sprintf("envoy-%03d", i), Metadata: md}})
 }
 
 func setLimit(t *testing.T, s *Server, target string, perCNode int, mode string) targetJSON {
@@ -393,5 +404,75 @@ func TestDrain(t *testing.T) {
 	}
 	if m.Mutating() != 0 {
 		t.Errorf("%d requests other than GET and the token call reached the cluster: drain is Delta-V's own, it changes nothing on VAST", m.Mutating())
+	}
+}
+
+// An Envoy can hold one connection to a VIP beyond its cap for every worker
+// thread after the first, so the cap is lowered by that much; and the status
+// says when no cap can hold the fleet to the limit, and how many Envoys do
+// not say how many workers they run.
+func TestLimitAllowsForWorkerThreads(t *testing.T) {
+	m := mockVAST(t)
+	s, _ := run(t, t.TempDir())
+	addCluster(t, s, m)
+	addTarget(t, s, "s3", "main", 9000)
+	limit := func() *limitStatus { return target(t, s, "s3").Status.Limit }
+
+	// 10 Envoys with 2 workers each, 2 VIPs per CNode, limit 100:
+	// 100 / (10 x 2) = 5 per VIP per Envoy, of which a second worker can
+	// take one beyond the cap. So the cap is 4.
+	for i := 0; i < 10; i++ {
+		connectWorkers(s, i, 2)
+	}
+	setLimit(t, s, "s3", 100, "enforce")
+	if l := limit(); l.Share != 4 || l.Workers != 2 || l.Undeclared != 0 || !l.Holds || l.Envoys != 10 {
+		t.Fatalf("ten Envoys with two workers: %+v", l)
+	}
+	if got := perHost(t, s, "s3"); got != 4 {
+		t.Errorf("per-host threshold served = %d, want 4", got)
+	}
+	for _, mem := range getJSON[fleetResponse](t, s, "/api/v1/fleet").Members {
+		if mem.Workers != 2 {
+			t.Errorf("%s: workers %d in the API, want 2", mem.NodeID, mem.Workers)
+		}
+	}
+
+	// The Envoy with the most workers decides: one with 8 joins, and
+	// 100 / (11 x 2) = 4 per VIP is less than its 8 workers can hold at any
+	// cap. The cap goes to its floor and the status says it cannot hold.
+	connectWorkers(s, 10, 8)
+	setLimit(t, s, "s3", 100, "enforce") // an operator's change is pushed at once
+	if l := limit(); l.Share != 1 || l.Workers != 8 || l.Holds {
+		t.Errorf("with an 8-worker Envoy: %+v", l)
+	}
+	// With room for it, it holds: 1000 / 22 = 45, less 7.
+	setLimit(t, s, "s3", 1000, "enforce")
+	if l := limit(); l.Share != 38 || !l.Holds {
+		t.Errorf("limit 1000 with an 8-worker Envoy: %+v", l)
+	}
+
+	// Envoys that do not say are counted, and taken as single-threaded for
+	// the arithmetic: there is nothing else to go on.
+	connect(s, 11, 14)
+	setLimit(t, s, "s3", 1000, "enforce")
+	if l := limit(); l.Undeclared != 3 || l.Workers != 8 || l.Envoys != 14 || l.Share != 28 {
+		t.Errorf("with three Envoys that do not say: %+v", l)
+	}
+	// Nonsense in the metadata is not a declaration.
+	for i, bad := range []any{0, -3, 2.5, "four", 100000} {
+		md, _ := structpb.NewStruct(map[string]any{fleet.WorkersMetadataKey: bad})
+		id := int64(7000 + i)
+		s.fleet.StreamOpen(id, "")
+		s.fleet.Request(id, &discoverygrpc.DiscoveryRequest{TypeUrl: resource.ClusterType, Node: &corev3.Node{Id: fmt.Sprintf("odd-%d", i), Metadata: md}})
+	}
+	setLimit(t, s, "s3", 1000, "enforce")
+	if l := limit(); l.Undeclared != 8 || l.Workers != 8 {
+		t.Errorf("with five Envoys declaring nonsense: %+v", l)
+	}
+
+	// Alert mode enforces nothing, so there is nothing that cannot hold.
+	setLimit(t, s, "s3", 1, "alert")
+	if l := limit(); !l.Holds || l.Share != 0 {
+		t.Errorf("alert mode: %+v", l)
 	}
 }

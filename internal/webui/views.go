@@ -510,12 +510,8 @@ func (u *UI) funcs() template.FuncMap {
 		"submit":      submit,
 		"sum":         func(a, b float64) float64 { return a + b },
 		"deref":       func(t *time.Time) time.Time { return *t },
-		// overcommitted: no share, however small, keeps the fleet within
-		// the limit, because each Envoy gets at least 1 per VIP.
-		"overcommitted": func(l *apiclient.LimitStatus) bool {
-			return l.Mode == "enforce" && uint64(l.Envoys)*uint64(l.MaxVIPsPerCNode) > uint64(l.PerCNode)
-		},
-		"percent": func(f float64) string { return strconv.FormatFloat(f*100, 'f', -1, 64) + "%" },
+		"less1":       func(n int) int { return max(n, 1) - 1 },
+		"percent":     func(f float64) string { return strconv.FormatFloat(f*100, 'f', -1, 64) + "%" },
 		"seconds": func(s float64) string {
 			if s >= 120 && s == float64(int(s/60))*60 {
 				return fmt.Sprintf("%d minutes", int(s/60))

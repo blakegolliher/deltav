@@ -7,43 +7,64 @@ import (
 
 func TestShare(t *testing.T) {
 	for _, tc := range []struct {
-		perCNode        uint32
-		envoys, maxVIPs int
-		want            uint32
-		why             string
+		perCNode                 uint32
+		envoys, maxVIPs, workers int
+		want                     uint32
+		why                      string
 	}{
-		{0, 10, 2, 0, "no limit: no threshold"},
-		{100, 1, 1, 100, "one Envoy, one VIP per CNode: the whole limit"},
-		{100, 10, 1, 10, "divided among the Envoys"},
-		{100, 10, 2, 5, "and by the VIPs a CNode hosts: 10 Envoys x 2 VIPs x 5 = 100"},
-		{100, 3, 2, 16, "rounded down: 3 x 2 x 16 = 96, never above the limit"},
-		{100, 7, 3, 4, "rounded down: 7 x 3 x 4 = 84"},
-		{100, 50, 2, 1, "exactly at the floor: 50 x 2 x 1 = 100"},
-		{100, 51, 2, 1, "never below 1, although 51 x 2 x 1 exceeds the limit"},
-		{100, 5000, 16, 1, "a large fleet: still 1"},
-		{5, 1, 8, 1, "a limit smaller than the VIPs on a CNode: still 1"},
-		{100, 0, 2, 50, "no Envoy connected yet counts as one"},
-		{100, 10, 0, 10, "no VIPs resolved yet counts as one per CNode"},
-		{4000000000, 1, 1, 4000000000, "large limits do not overflow"},
+		{0, 10, 2, 1, 0, "no limit: no threshold"},
+		{100, 1, 1, 1, 100, "one Envoy, one VIP per CNode: the whole limit"},
+		{100, 10, 1, 1, 10, "divided among the Envoys"},
+		{100, 10, 2, 1, 5, "and by the VIPs a CNode hosts: 10 Envoys x 2 VIPs x 5 = 100"},
+		{100, 3, 2, 1, 16, "rounded down: 3 x 2 x 16 = 96, never above the limit"},
+		{100, 7, 3, 1, 4, "rounded down: 7 x 3 x 4 = 84"},
+		{100, 50, 2, 1, 1, "exactly at the floor: 50 x 2 x 1 = 100"},
+		{100, 51, 2, 1, 1, "never below 1, although 51 x 2 x 1 exceeds the limit"},
+		{100, 5000, 16, 1, 1, "a large fleet: still 1"},
+		{5, 1, 8, 1, 1, "a limit smaller than the VIPs on a CNode: still 1"},
+		{100, 0, 2, 1, 50, "no Envoy connected yet counts as one"},
+		{100, 10, 0, 1, 10, "no VIPs resolved yet counts as one per CNode"},
+		{4000000000, 1, 1, 1, 4000000000, "large limits do not overflow"},
+		// Worker threads: an Envoy holds up to share + workers - 1 to a VIP.
+		{100, 10, 2, 0, 5, "workers unknown counts as one"},
+		{100, 10, 2, 2, 4, "two workers: 4 + 1 = 5 per VIP, 10 x 2 x 5 = 100"},
+		{100, 10, 2, 5, 1, "five workers: 1 + 4 = 5 per VIP, exactly the limit"},
+		{100, 10, 2, 6, 1, "six workers: never below 1, although 10 x 2 x 6 exceeds the limit"},
+		{100, 10, 2, 64, 1, "a many-core client with a small limit: 1, and it cannot hold"},
+		{6, 1, 2, 2, 2, "the integration test's case: 2 + 1 = 3 per VIP, 6 per CNode"},
+		{6, 1, 2, 1, 3, "and with one worker"},
 	} {
-		if got := Share(tc.perCNode, tc.envoys, tc.maxVIPs); got != tc.want {
-			t.Errorf("Share(%d, %d Envoys, %d VIPs per CNode) = %d, want %d: %s", tc.perCNode, tc.envoys, tc.maxVIPs, got, tc.want, tc.why)
+		if got := Share(tc.perCNode, tc.envoys, tc.maxVIPs, tc.workers); got != tc.want {
+			t.Errorf("Share(%d, %d Envoys, %d VIPs per CNode, %d workers) = %d, want %d: %s", tc.perCNode, tc.envoys, tc.maxVIPs, tc.workers, got, tc.want, tc.why)
 		}
 	}
-	// The property the formula exists for: wherever the share is above the
-	// floor of 1, the fleet's worst case stays within the limit.
+	// The property the formula exists for: whenever Holds says the fleet
+	// can be kept within the limit, the share does keep it there, counting
+	// what worker threads can add; and when it cannot, the share is 1.
 	for limit := uint32(1); limit <= 300; limit += 7 {
 		for envoys := 1; envoys <= 40; envoys++ {
 			for vips := 1; vips <= 4; vips++ {
-				share := Share(limit, envoys, vips)
-				worst := uint64(share) * uint64(envoys) * uint64(vips)
-				if share > 1 && worst > uint64(limit) {
-					t.Fatalf("limit %d, %d Envoys, %d VIPs: share %d allows %d connections to one CNode", limit, envoys, vips, share, worst)
-				}
-				if share < 1 {
-					t.Fatalf("limit %d, %d Envoys, %d VIPs: share %d", limit, envoys, vips, share)
+				for workers := 1; workers <= 9; workers += 2 {
+					share := Share(limit, envoys, vips, workers)
+					worst := (uint64(share) + uint64(workers) - 1) * uint64(envoys) * uint64(vips)
+					holds := Holds(limit, envoys, vips, workers)
+					switch {
+					case share < 1:
+						t.Fatalf("limit %d, %d Envoys, %d VIPs, %d workers: share %d", limit, envoys, vips, workers, share)
+					case holds && worst > uint64(limit):
+						t.Fatalf("limit %d, %d Envoys, %d VIPs, %d workers: share %d allows %d connections to one CNode", limit, envoys, vips, workers, share, worst)
+					case !holds && share != 1:
+						t.Fatalf("limit %d, %d Envoys, %d VIPs, %d workers: cannot hold, yet the share is %d", limit, envoys, vips, workers, share)
+					case !holds && worst <= uint64(limit):
+						t.Fatalf("limit %d, %d Envoys, %d VIPs, %d workers: Holds says no, but share 1 allows only %d", limit, envoys, vips, workers, worst)
+					}
 				}
 			}
+		}
+	}
+	for _, c := range []struct{ a, b, c int }{{0, 0, 0}, {-1, 0, 5}} {
+		if !Holds(100, c.a, c.b, c.c) && c.c < 100 {
+			t.Errorf("Holds(100, %d, %d, %d): values below 1 count as 1", c.a, c.b, c.c)
 		}
 	}
 }

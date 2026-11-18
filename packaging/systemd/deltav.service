@@ -1,0 +1,49 @@
+# Delta-V daemon: xDS for the fleet's Envoys, telemetry ingest, VAST pollers,
+# the HTTP API and the web UI.
+#
+# Settings go in /etc/deltav/deltav.env (see deltav.env.example); every
+# "deltav serve" flag has a DELTAV_ variable. The state directory holds the
+# VAST password, so it and the files in it are private to the service.
+
+[Unit]
+Description=Delta-V control plane for loopback Envoys
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/deltav/deltav.env
+ExecStart=/usr/local/bin/deltav serve
+Restart=on-failure
+RestartSec=2
+
+# Envoys keep their last config while the daemon is down, so a restart costs
+# telemetry, not traffic. Stop promptly all the same.
+TimeoutStopSec=30
+
+# One long-lived gRPC connection per Envoy, plus telemetry streams.
+LimitNOFILE=1048576
+
+# A user of its own, with /var/lib/deltav and nothing else to write to.
+DynamicUser=yes
+StateDirectory=deltav
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

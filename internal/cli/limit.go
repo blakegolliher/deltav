@@ -22,6 +22,9 @@ type limitStatus struct {
 	Computed        uint32 `json:"computed"`
 	Envoys          int    `json:"envoys"`
 	MaxVIPsPerCNode int    `json:"max_vips_per_cnode"`
+	Workers         int    `json:"workers"`
+	Undeclared      int    `json:"undeclared_workers"`
+	Holds           bool   `json:"holds"`
 }
 
 // describe says what a limit means for the fleet as it is now.
@@ -32,10 +35,22 @@ func (l *limitStatus) describe() string {
 	if l.Mode != "enforce" {
 		return fmt.Sprintf("%d connections per CNode, alert only: CNodes over it are reported, nothing is enforced", l.PerCNode)
 	}
-	s := fmt.Sprintf("%d connections per CNode, enforced: each of %d Envoys may open %d to each VIP (a CNode hosts up to %d of this target's VIPs)",
-		l.PerCNode, max(l.Envoys, 1), l.Share, max(l.MaxVIPsPerCNode, 1))
-	if worst := uint64(l.Share) * uint64(max(l.Envoys, 1)) * uint64(max(l.MaxVIPsPerCNode, 1)); worst > uint64(l.PerCNode) {
-		s += fmt.Sprintf("; the share cannot go below 1, so the fleet can reach %d", worst)
+	envoys, vips, workers := max(l.Envoys, 1), max(l.MaxVIPsPerCNode, 1), max(l.Workers, 1)
+	who := fmt.Sprintf("each of %d Envoys", envoys)
+	if envoys == 1 {
+		who = "the one Envoy"
+	}
+	s := fmt.Sprintf("%d connections per CNode, enforced: %s is capped at %d to each VIP (a CNode hosts up to %d of this target's VIPs",
+		l.PerCNode, who, l.Share, vips)
+	if workers > 1 {
+		s += fmt.Sprintf("; the cap is %d lower than the division gives, because an Envoy with %d worker threads can hold that many more", workers-1, workers)
+	}
+	s += ")"
+	if !l.Holds {
+		s += fmt.Sprintf("; this cannot hold: no cap is below 1, so the fleet can reach %d", uint64(envoys)*uint64(vips)*uint64(workers))
+	}
+	if l.Undeclared > 0 {
+		s += fmt.Sprintf("; %d connected Envoys do not say how many worker threads they run and can exceed the cap by that number less one", l.Undeclared)
 	}
 	if l.Computed != l.Share {
 		s += fmt.Sprintf("; the fleet has changed and %d would be right now, held back to spare Envoys a reconnect", l.Computed)
@@ -58,7 +73,7 @@ func newLimitSetCmd() *cobra.Command {
 			"  alert    (default) CNodes over the limit are reported in the API, the TUI and\n" +
 			"           /metrics. Nothing is enforced.\n" +
 			"  enforce  Each Envoy is also given a cap on its connections to each VIP.\n\n" +
-			"Two things to know about enforce:\n\n" +
+			"Three things to know about enforce:\n\n" +
 			"  The cap is local to each Envoy. The limit is therefore divided by the number of\n" +
 			"  connected Envoys, and by the most VIPs of the target that any one CNode hosts, and\n" +
 			"  rounded down, but never below 1. A CNode hosting fewer VIPs gets less than the limit;\n" +
@@ -67,6 +82,10 @@ func newLimitSetCmd() *cobra.Command {
 			"  Changing the cap makes every Envoy reconnect its connections for the target. As\n" +
 			"  Envoys come and go, a new cap is pushed only when it differs enough and not too soon\n" +
 			"  after the last one (see \"serve --limit-min-change\" and \"--limit-min-interval\").\n\n" +
+			"  Each worker thread of an Envoy can hold one connection to a VIP beyond the cap.\n" +
+			"  The client unit tells the daemon how many workers its Envoy runs, and the cap is\n" +
+			"  lowered by that number less one, so the limit still holds. An Envoy started some\n" +
+			"  other way does not say, and can exceed its cap by its worker count less one.\n\n" +
 			"--per-cnode 0 removes the limit.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

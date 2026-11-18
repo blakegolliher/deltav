@@ -220,10 +220,8 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     share + *W* − 1 connections to a VIP. Observed with a share of 3: one worker, 3 at most on
     every backend; two workers, 4 on some. So enforce mode is exact only for Envoys started with
     `--concurrency 1`. Envoy's default is one worker per core, and on a many-core client a small
-    share then hardly binds. Alert mode counts what really happens either way. **Not built yet:**
-    the share does not allow for workers, because the daemon does not know how many each Envoy
-    runs. Milestone 8 writes the client unit, which is where `--concurrency` is set; the choice
-    there (few workers and a tight cap, or many and a loose one) is the user's.
+    share then hardly binds. Alert mode counts what really happens either way. Amendment 40 is
+    what was done about it.
 
 ### Milestone 5: web UI
 
@@ -266,6 +264,34 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     through `curl`. htmx's part (merging events, partial page swaps, confirmation prompts, the
     redirect to the login form when a session ends) was checked by reading the pinned htmx 4.0.1
     source, not by running it. Nobody has looked at the rendering.
+
+### Milestone 8: packaging
+
+40. **The share allows for worker threads, and each Envoy says how many it has.** Envoy does not
+    report its thread count. The client unit therefore passes one variable,
+    `DELTAV_ENVOY_WORKERS`, twice: as `--concurrency`, and as node metadata (`deltav_workers`)
+    through `--config-yaml`, which Envoy merges into the shared bootstrap. The daemon takes the
+    largest count any connected Envoy declares, *W*, and serves the threshold
+    `max(1, floor(L / (N × k_max)) − (W − 1))`, so that threshold + *W* − 1, the most an Envoy
+    can hold to a VIP, is the per-Envoy, per-VIP part of the limit. When N × k_max × W exceeds L
+    no threshold can hold the limit; the status says so (`holds`). Envoys that declare nothing
+    are counted (`undeclared_workers`) and treated as single-threaded, there being nothing else
+    to go on. Seen against real Envoy started with the unit's own command line: limit 6 per
+    CNode, two workers, threshold 2, and no backend above 3; the same without the declaration,
+    threshold 3, and backends at 4. The unit's default of 2 workers is the one Istio uses for
+    its sidecars; **it is a guess about the traffic one client carries, and the user's to set.**
+41. **The units.** `deltav.service` runs the daemon under `DynamicUser` with `StateDirectory`
+    as its only writable path. `deltav-envoy.service` runs Envoy with `--service-node %H`
+    (amendment 11) and restarts it always. Both are files in `packaging/systemd`, installed by
+    `make install` and printed by `deltav unit`, so the ones on a host can match its binary. The
+    integration tests take Envoy's arguments from the client unit itself, filling in its
+    variables as systemd does; systemd 252 was seen to expand the variable inside the quoted
+    `--config-yaml` argument into one argument (a throwaway `systemd-run --user` of `printf`).
+    Not tested: the units themselves under systemd. `systemd-analyze verify` accepts them, and
+    nothing was installed on the dev host.
+42. **Envoy's admin interface is off unless asked for.** `deltav bootstrap` used to give it
+    `127.0.0.1:9901`. It has no authentication, and on a shared client host any local user
+    could stop Envoy or read its config through it. `--admin-address` turns it on.
 
 ## Known gaps (POC)
 

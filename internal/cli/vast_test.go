@@ -253,13 +253,13 @@ func TestLimitAndDrainCommands(t *testing.T) {
 	// Enforce says what each Envoy gets. No Envoy is connected, which
 	// counts as one: 100 / (1 x 2 VIPs per CNode) = 50.
 	got = mustRun(t, "limit", "set", "s3", "--api", api, "--per-cnode", "100", "--mode", "enforce")
-	if got != "s3: 100 connections per CNode, enforced: each of 1 Envoys may open 50 to each VIP (a CNode hosts up to 2 of this target's VIPs)\n" {
+	if got != "s3: 100 connections per CNode, enforced: the one Envoy is capped at 50 to each VIP (a CNode hosts up to 2 of this target's VIPs)\n" {
 		t.Errorf("limit set (enforce): %q", got)
 	}
 	// A limit too small to divide: the share stops at 1 and the command says
 	// what that allows.
 	got = mustRun(t, "limit", "set", "s3", "--api", api, "--per-cnode", "1", "--mode", "enforce")
-	if !strings.Contains(got, "may open 1 to each VIP") || !strings.Contains(got, "the share cannot go below 1, so the fleet can reach 2") {
+	if !strings.Contains(got, "is capped at 1 to each VIP") || !strings.Contains(got, "this cannot hold: no cap is below 1, so the fleet can reach 2") {
 		t.Errorf("limit set below the floor: %q", got)
 	}
 	got = mustRun(t, "target", "list", "--api", api)

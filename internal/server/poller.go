@@ -69,6 +69,18 @@ type limitStatus struct {
 	Computed        uint32 `json:"computed"`
 	Envoys          int    `json:"envoys"`             // connected Envoys the limit is divided among
 	MaxVIPsPerCNode int    `json:"max_vips_per_cnode"` // most VIPs of this target on one CNode
+	// Workers is the most worker threads any connected Envoy declares (at
+	// least 1). An Envoy can hold Workers - 1 connections to a VIP beyond
+	// its share, so the share is reduced by that much.
+	Workers int `json:"workers"`
+	// Undeclared counts connected Envoys that do not say how many workers
+	// they run. Each of those can exceed its share by its own, unknown,
+	// number of workers less one.
+	Undeclared int `json:"undeclared_workers"`
+	// Holds is false when no share can keep this fleet within the limit:
+	// Envoys × VIPs on one CNode × workers is more than the limit, and no
+	// Envoy can be given less than 1. Enforce mode only.
+	Holds bool `json:"holds"`
 }
 
 type apiEntry struct {
@@ -323,6 +335,7 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 		drained[d.Cluster][d.CNode] = true
 	}
 	envoys := p.s.fleet.Connected()
+	workers, undeclared := p.s.fleet.Workers()
 	now := p.now()
 	known := map[string]bool{}
 	for _, t := range targets {
@@ -363,7 +376,7 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 		}
 		spec := xds.TargetSpec{Name: t.Name, ListenPort: t.ListenPort, Endpoints: eps, AccessLog: true}
 		if t.Limit != nil {
-			ls := &limitStatus{PerCNode: t.Limit.PerCNode, Mode: t.Limit.Mode, Envoys: envoys}
+			ls := &limitStatus{PerCNode: t.Limit.PerCNode, Mode: t.Limit.Mode, Envoys: envoys, Workers: max(workers, 1), Undeclared: undeclared, Holds: true}
 			perCNode := map[string]int{}
 			for _, e := range eps {
 				perCNode[e.CNode]++
@@ -371,7 +384,8 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 			}
 			want := uint32(0)
 			if t.Limit.Mode == state.ModeEnforce {
-				ls.Computed = limit.Share(t.Limit.PerCNode, envoys, ls.MaxVIPsPerCNode)
+				ls.Computed = limit.Share(t.Limit.PerCNode, envoys, ls.MaxVIPsPerCNode, workers)
+				ls.Holds = limit.Holds(t.Limit.PerCNode, envoys, ls.MaxVIPsPerCNode, workers)
 				want = ls.Computed
 			}
 			d := p.debounce[t.Name]

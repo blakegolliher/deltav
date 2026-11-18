@@ -66,17 +66,40 @@ func TestBootstrapCommand(t *testing.T) {
 	if err := protojson.Unmarshal([]byte(got), &b); err != nil {
 		t.Fatalf("output is not an Envoy bootstrap: %v\n%s", err, got)
 	}
-	if b.GetAdmin().GetAddress().GetSocketAddress().GetPortValue() != 9901 {
-		t.Errorf("default admin address missing: %v", b.GetAdmin())
+	// Envoy's admin interface has no authentication and can stop Envoy, so
+	// it is off unless asked for.
+	if b.GetAdmin() != nil {
+		t.Errorf("the admin interface must be off by default: %v", b.GetAdmin())
 	}
 
-	got, err = run(t, "dv", "bootstrap", "--xds-address", "192.0.2.10:18000", "--admin-address", "")
+	got, err = run(t, "dv", "bootstrap", "--xds-address", "192.0.2.10:18000", "--admin-address", "127.0.0.1:9901")
 	if err != nil {
 		t.Fatal(err)
 	}
 	b.Reset()
-	if err := protojson.Unmarshal([]byte(got), &b); err != nil || b.GetAdmin() != nil {
-		t.Errorf("--admin-address '' must turn the admin interface off: %v %v", err, b.GetAdmin())
+	if err := protojson.Unmarshal([]byte(got), &b); err != nil || b.GetAdmin().GetAddress().GetSocketAddress().GetPortValue() != 9901 {
+		t.Errorf("--admin-address must turn the admin interface on: %v %v", err, b.GetAdmin())
+	}
+
+	// The systemd units and their example environment files.
+	for name, wants := range map[string][]string{
+		"daemon":     {"ExecStart=/usr/local/bin/deltav serve", "StateDirectory=deltav", "EnvironmentFile=-/etc/deltav/deltav.env"},
+		"client":     {"--config-path /etc/deltav/envoy.json", "--service-node %H", "--concurrency ${DELTAV_ENVOY_WORKERS}", "deltav_workers: ${DELTAV_ENVOY_WORKERS}"},
+		"daemon-env": {"DELTAV_API_TOKEN", "DELTAV_HTTP_ADDR"},
+		"client-env": {"DELTAV_ENVOY_WORKERS"},
+	} {
+		got, err := run(t, "dv", "unit", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range wants {
+			if !strings.Contains(got, w) {
+				t.Errorf("unit %s: missing %q", name, w)
+			}
+		}
+	}
+	if _, err := run(t, "dv", "unit", "nope"); err == nil {
+		t.Error("an unknown unit name should be an error")
 	}
 
 	if _, err := run(t, "dv", "bootstrap"); err == nil || !strings.Contains(err.Error(), "--xds-address") {

@@ -416,6 +416,9 @@ func (m *Model) controlsView() ([]string, int) {
 						if l.Computed != l.Share {
 							limit += styleDim.Render(fmt.Sprintf(" (%d held back)", l.Computed))
 						}
+						if !l.Holds {
+							limit += " " + styleWarn.Render("cannot hold")
+						}
 					}
 				}
 			}
@@ -448,8 +451,8 @@ func (m *Model) controlsView() ([]string, int) {
 	out = append(out, "",
 		styleDim.Render("A limit is the connections (requests in flight) the fleet should hold to any one CNode for a target."),
 		styleDim.Render("alert reports CNodes over it. enforce also caps every Envoy, at limit ÷ (connected Envoys × most VIPs on"),
-		styleDim.Render("one CNode), never below 1. The cap is each Envoy's own, so the fleet total is approximate; and changing"),
-		styleDim.Render("it makes Envoys reconnect, so as Envoys come and go a new cap is held back until it differs enough."),
+		styleDim.Render("one CNode), less one for each worker thread an Envoy runs beyond the first, never below 1. Changing the"),
+		styleDim.Render("cap makes Envoys reconnect, so as Envoys come and go a new cap is held back until it differs enough."),
 		styleDim.Render("Drain withholds a CNode's VIPs from every Envoy until it is undrained. Nothing changes on the VAST cluster."),
 		styleDim.Render("Clusters and targets are added and removed with \"deltav vast\" and \"deltav target\"."))
 	return out, focus

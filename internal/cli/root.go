@@ -74,6 +74,7 @@ func NewRoot(name string) *cobra.Command {
 		newNodeCmd(),
 		newLimitCmd(),
 		newBootstrapCmd(),
+		newUnitCmd(),
 	)
 	return root
 }

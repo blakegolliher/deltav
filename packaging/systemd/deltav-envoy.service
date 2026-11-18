@@ -1,0 +1,59 @@
+# Envoy on a client host, configured entirely by the Delta-V daemon: it
+# listens on loopback and balances S3 requests across a VAST cluster's VIPs.
+#
+# It needs three things on the host: the Envoy binary, this unit, and
+# /etc/deltav/envoy.json, which is the output of "deltav bootstrap" and is the
+# same file on every host. The host's name becomes the Envoy's name in the
+# fleet (--service-node %H).
+#
+# DELTAV_ENVOY_WORKERS is the number of worker threads. More threads carry
+# more traffic. Each thread can also hold one connection to a VIP beyond an
+# enforced limit's cap, so the unit tells the daemon the number (in the node
+# metadata), and the daemon lowers the cap to allow for it. Set it in
+# /etc/deltav/envoy.env; both uses below read the same variable, so they
+# cannot disagree.
+
+[Unit]
+Description=Envoy for Delta-V (S3 load balancing to VAST, on loopback)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=DELTAV_ENVOY_WORKERS=2
+EnvironmentFile=-/etc/deltav/envoy.env
+ExecStart=/usr/local/bin/envoy \
+    --config-path /etc/deltav/envoy.json \
+    --config-yaml "node: {metadata: {deltav_workers: ${DELTAV_ENVOY_WORKERS}}}" \
+    --concurrency ${DELTAV_ENVOY_WORKERS} \
+    --service-node %H \
+    --disable-hot-restart \
+    --log-level warn
+# Stopping Envoy ends the requests in flight through it; S3 clients retry.
+Restart=always
+RestartSec=2
+
+# One connection per S3 request in flight, on both sides.
+LimitNOFILE=1048576
+
+# It needs the network and its config file, and nothing else. The one
+# capability lets a target listen on a port below 1024.
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

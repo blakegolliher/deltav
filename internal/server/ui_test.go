@@ -167,7 +167,7 @@ func TestUIPages(t *testing.T) {
 		"/controls": {
 			`<title>Controls · Delta-V</title>`, "Connection limit per CNode", "No limit", `action="/controls/limit"`, `hx-post="/controls/limit"`,
 			"Drain a CNode", `hx-confirm="Drain ` + cnodes[0], `<code>` + m.Host() + `</code>`, "Certificate not verified",
-			"The cap is each Envoy's own", "by more than 20%", "no sooner than a minute", "one worker thread",
+			"The cap is each Envoy's own", "by more than 20%", "no sooner than a minute", "Each worker thread of an Envoy can hold one connection more than the cap", "DELTAV_ENVOY_WORKERS",
 			"Attach a cluster", "Add a target", `<option value="main">`, "every 60 minutes",
 		},
 	}
@@ -258,8 +258,9 @@ func TestUILimitAndDrainShow(t *testing.T) {
 		t.Error("one CNode should be over its limit and two within it")
 	}
 	_, _, ctl := page(t, s, "/controls")
-	mustContain(t, "controls with a limit", ctl, "5 per CNode,", "enforced", "Each Envoy may hold 1 to each VIP: 5 ÷ 3 Envoys ÷ 2 VIPs on one CNode.",
-		"Cannot hold", "3 Envoys × 2 VIPs is more than the limit", hot+" has 8 in flight", `value="5"`, `<option value="enforce" selected>`, "Remove limit")
+	mustContain(t, "controls with a limit", ctl, "5 per CNode,", "enforced", "Each Envoy's cap is 1 per VIP: 5 ÷ 3 Envoys ÷ 2 VIPs on one CNode.",
+		"Cannot hold", "3 Envoys × 2 VIPs is more than the limit", hot+" has 8 in flight", `value="5"`, `<option value="enforce" selected>`, "Remove limit",
+		"Workers unknown", "3 connected Envoys do not say how many worker threads they run")
 	for what, doc := range map[string]string{"overview": home, "cnodes": cn, "controls": ctl} {
 		if err := wellFormed(doc); err != nil {
 			t.Errorf("%s with a limit: %v", what, err)

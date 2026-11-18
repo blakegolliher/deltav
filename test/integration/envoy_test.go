@@ -29,6 +29,7 @@ import (
 	"deltav/internal/vast/vasttest"
 	"deltav/internal/version"
 	"deltav/internal/xds"
+	"deltav/packaging/systemd"
 )
 
 var creds = &lab.Credentials{AccessKey: "dvlab", SecretKey: "dvlab-secret"}
@@ -161,8 +162,75 @@ func envoy(t *testing.T, s *server.Server, nodeID string) {
 	envoyWith(t, s, nodeID, envoyWorkers)
 }
 
-// envoyWith is envoy with a chosen number of worker threads.
+// envoyWith is envoy with a chosen number of worker threads, which it
+// declares to the daemon as the client unit makes it do.
 func envoyWith(t *testing.T, s *server.Server, nodeID string, workers int) {
+	t.Helper()
+	startEnvoy(t, s, nodeID, workers, true)
+}
+
+// unitArgs returns the arguments the client unit (deltav-envoy.service)
+// starts Envoy with, with the unit's variables filled in as systemd would:
+// ${DELTAV_ENVOY_WORKERS}, %H, and the path of the bootstrap file. Running
+// Envoy with these is running what a client host runs.
+func unitArgs(t *testing.T, bootPath, nodeID string, workers int) []string {
+	t.Helper()
+	// The ExecStart setting, with its continuation lines joined.
+	var cmdline string
+	lines := strings.Split(systemd.Client, "\n")
+	for i, line := range lines {
+		rest, ok := strings.CutPrefix(line, "ExecStart=")
+		if !ok {
+			continue
+		}
+		for strings.HasSuffix(rest, "\\") {
+			i++
+			rest = strings.TrimSuffix(rest, "\\") + " " + strings.TrimSpace(lines[i])
+		}
+		cmdline = rest
+		break
+	}
+	if cmdline == "" {
+		t.Fatal("the client unit has no ExecStart")
+	}
+	cmdline = strings.NewReplacer(
+		"${DELTAV_ENVOY_WORKERS}", strconv.Itoa(workers), "%H", nodeID, "/etc/deltav/envoy.json", bootPath,
+	).Replace(cmdline)
+	if strings.ContainsAny(cmdline, "$%") {
+		t.Fatalf("the client unit uses a variable this test does not fill in: %s", cmdline)
+	}
+	// Split into words; a double-quoted stretch is one word.
+	var args []string
+	var word strings.Builder
+	quoted, inWord := false, false
+	for _, c := range cmdline {
+		switch {
+		case c == '"':
+			quoted, inWord = !quoted, true
+		case (c == ' ' || c == '\t') && !quoted:
+			if inWord {
+				args = append(args, word.String())
+				word.Reset()
+				inWord = false
+			}
+		default:
+			word.WriteRune(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		args = append(args, word.String())
+	}
+	if len(args) < 2 || !strings.HasSuffix(args[0], "/envoy") {
+		t.Fatalf("the client unit's command is not Envoy: %q", args)
+	}
+	return args[1:]
+}
+
+// startEnvoy runs Envoy with the client unit's own arguments. If declare is
+// false the node metadata that tells the daemon the worker count is left
+// out, as for an Envoy that was started some other way.
+func startEnvoy(t *testing.T, s *server.Server, nodeID string, workers int, declare bool) {
 	t.Helper()
 	dir := t.TempDir()
 	boot, err := xds.BootstrapJSON(xds.BootstrapOptions{XDSAddress: s.GRPCAddr()})
@@ -174,14 +242,22 @@ func envoyWith(t *testing.T, s *server.Server, nodeID string, workers int) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(dir, "envoy.log")
-	cmd := exec.Command(envoyBin(t),
-		"-c", bootPath,
-		"--service-node", nodeID,
-		"--disable-hot-restart", // several Envoys on one host; no shared memory to collide on
-		"--concurrency", strconv.Itoa(workers),
-		"--log-level", "info",
-		"--log-path", logPath,
-	)
+	args := unitArgs(t, bootPath, nodeID, workers)
+	if !declare {
+		kept := args[:0:0]
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--config-yaml" {
+				i++
+				continue
+			}
+			kept = append(kept, args[i])
+		}
+		if len(kept) != len(args)-2 {
+			t.Fatal("the client unit no longer passes --config-yaml")
+		}
+		args = kept
+	}
+	cmd := exec.Command(envoyBin(t), append(args, "--log-path", logPath)...)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting Envoy: %v", err)
@@ -901,6 +977,13 @@ func vastTarget(t *testing.T, cfg lab.FakeS3Config) (*server.Server, *vasttest.S
 // vastTargetWith is vastTarget with a chosen number of Envoy worker threads.
 func vastTargetWith(t *testing.T, cfg lab.FakeS3Config, workers int) (*server.Server, *vasttest.Server, []*lab.FakeS3, []string, uint32) {
 	t.Helper()
+	return vastTargetOpt(t, cfg, workers, true)
+}
+
+// vastTargetOpt is vastTargetWith, with the choice of whether the Envoy
+// tells the daemon its worker count.
+func vastTargetOpt(t *testing.T, cfg lab.FakeS3Config, workers int, declare bool) (*server.Server, *vasttest.Server, []*lab.FakeS3, []string, uint32) {
+	t.Helper()
 	cfgs := make([]lab.FakeS3Config, 6)
 	for i := range cfgs {
 		cfgs[i] = cfg
@@ -929,7 +1012,7 @@ func vastTargetWith(t *testing.T, cfg lab.FakeS3Config, workers int) (*server.Se
 	postAPI(t, s, "/api/v1/targets", map[string]any{
 		"name": "main", "cluster": "lab", "pool": "main", "port": eps[0].Port, "listen_port": port,
 	})
-	envoyWith(t, s, "it-envoy-1", workers)
+	startEnvoy(t, s, "it-envoy-1", workers, declare)
 	waitMember(t, s, "it-envoy-1", "connected and in sync", inSync)
 	waitListener(t, port)
 	return s, mock, fakes, mock.PoolCNodes("main"), port
@@ -953,11 +1036,29 @@ func over(t *testing.T, s *server.Server) []string {
 	return out
 }
 
+// limitNow returns the target's limit as the API reports it.
+func limitNow(t *testing.T, s *server.Server) (share uint32, workers, undeclared int, holds bool) {
+	t.Helper()
+	l := getAPI[struct {
+		Targets []struct {
+			Status struct {
+				Limit struct {
+					Share      uint32 `json:"share"`
+					Workers    int    `json:"workers"`
+					Undeclared int    `json:"undeclared_workers"`
+					Holds      bool   `json:"holds"`
+				} `json:"limit"`
+			} `json:"status"`
+		} `json:"targets"`
+	}](t, s, "/api/v1/targets").Targets[0].Status.Limit
+	return l.Share, l.Workers, l.Undeclared, l.Holds
+}
+
 // enforced sets the target's limit to 6 per CNode in enforce mode (one
-// Envoy, two VIPs per CNode: a share of 3 per VIP), runs 48 workers through
-// the listener for 5 seconds, and returns the most requests each backend
-// had at once. Nothing may fail, and the API must not report a CNode over
-// the limit unless allowOver.
+// Envoy, two VIPs per CNode: 3 per VIP before worker threads are allowed
+// for), runs 48 workers through the listener for 5 seconds, and returns the
+// most requests each backend had at once. Nothing may fail, and the API
+// must not report a CNode over the limit unless allowOver.
 func enforced(t *testing.T, s *server.Server, fakes []*lab.FakeS3, port uint32, allowOver bool) []int64 {
 	t.Helper()
 	sendAPI(t, s, http.MethodPut, "/api/v1/targets/main/limit", map[string]any{"per_cnode": 6, "mode": "enforce"})
@@ -992,33 +1093,59 @@ func enforced(t *testing.T, s *server.Server, fakes []*lab.FakeS3, port uint32, 
 	return most
 }
 
-// Milestone 7, enforce mode, with one Envoy worker thread: the cap holds
-// each backend to exactly its share, and excess requests wait and are not
-// failed.
+// Milestone 7, enforce mode, with one Envoy worker thread: the cap is the
+// whole share, it holds each backend to exactly that, and excess requests
+// wait and are not failed.
 func TestLimitEnforceExactWithOneWorker(t *testing.T) {
 	// Slow backends, so that requests pile up.
 	s, _, fakes, _, port := vastTargetWith(t, lab.FakeS3Config{Latency: 100 * time.Millisecond}, 1)
-	for i, got := range enforced(t, s, fakes, port, false) {
+	most := enforced(t, s, fakes, port, false)
+	if share, workers, undeclared, holds := limitNow(t, s); share != 3 || workers != 1 || undeclared != 0 || !holds {
+		t.Errorf("limit status: share %d, workers %d, undeclared %d, holds %v; want 3, 1, 0, true", share, workers, undeclared, holds)
+	}
+	for i, got := range most {
 		if got > 3 || got == 0 {
 			t.Errorf("backend %d had up to %d requests at once; the cap is 3 per VIP and this Envoy has one worker", i, got)
 		}
 	}
 }
 
-// Milestone 7, enforce mode, with two Envoy worker threads. Envoy lets
-// every worker open one connection to a host whatever the cap says, so a
-// backend can have up to share + workers - 1 requests at once (DESIGN.md,
-// amendment 34). Also: taking the cap away under load (which rebuilds
-// Envoy's cluster) fails nothing; and with no cap the same load goes over
-// the limit, which alert mode reports.
-func TestLimitEnforceThroughEnvoy(t *testing.T) {
-	s, _, fakes, _, port := vastTarget(t, lab.FakeS3Config{Latency: 100 * time.Millisecond})
+// An Envoy that was not started by the client unit does not tell the daemon
+// how many worker threads it runs. The daemon says so, and the cap leaks as
+// amendment 34 describes: Envoy lets every worker open one connection to a
+// host whatever the cap, so with two workers a backend can have one request
+// more than the cap of 3, and a CNode (two VIPs) can be over its limit of 6.
+func TestLimitEnforceUndeclaredWorkers(t *testing.T) {
+	s, _, fakes, _, port := vastTargetOpt(t, lab.FakeS3Config{Latency: 100 * time.Millisecond}, envoyWorkers, false)
+	most := enforced(t, s, fakes, port, true)
+	if share, workers, undeclared, _ := limitNow(t, s); share != 3 || workers != 1 || undeclared != 1 {
+		t.Errorf("limit status: share %d, workers %d, undeclared %d; want 3, 1, 1", share, workers, undeclared)
+	}
 	const bound = 3 + envoyWorkers - 1
-	// A CNode has two VIPs, so it can be over its limit of 6 by as much as
-	// the workers add: the API may say so, and that is the truth.
-	for i, got := range enforced(t, s, fakes, port, true) {
+	for i, got := range most {
 		if got > bound || got == 0 {
 			t.Errorf("backend %d had up to %d requests at once; the cap is 3 per VIP and %d workers allow at most %d", i, got, envoyWorkers, bound)
+		}
+	}
+}
+
+// Milestone 7, enforce mode, with two Envoy worker threads that the Envoy
+// declares, as the client unit makes it. The daemon lowers the cap by one to
+// allow for the second worker (amendment 40), so no backend has more than
+// the 3 its share of the limit allows and no CNode goes over. Also: taking
+// the cap away under load (which rebuilds Envoy's cluster) fails nothing;
+// and with no cap the same load goes over the limit, which alert mode
+// reports.
+func TestLimitEnforceThroughEnvoy(t *testing.T) {
+	s, _, fakes, _, port := vastTarget(t, lab.FakeS3Config{Latency: 100 * time.Millisecond})
+	const bound = 3 // per VIP: limit 6, one Envoy, two VIPs per CNode
+	most := enforced(t, s, fakes, port, false)
+	if share, workers, undeclared, holds := limitNow(t, s); share != bound-(envoyWorkers-1) || workers != envoyWorkers || undeclared != 0 || !holds {
+		t.Errorf("limit status: share %d, workers %d, undeclared %d, holds %v; want %d, %d, 0, true", share, workers, undeclared, holds, bound-(envoyWorkers-1), envoyWorkers)
+	}
+	for i, got := range most {
+		if got > bound || got == 0 {
+			t.Errorf("backend %d had up to %d requests at once; with the cap lowered for %d workers it should never pass %d", i, got, envoyWorkers, bound)
 		}
 	}
 	done := make(chan *lab.LoadResult, 1)

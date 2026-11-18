@@ -51,7 +51,10 @@
       <tr id="{{.ID}}">
         <th scope="row"><span class="name">{{.NodeID}}</span></th>
         <td><code>{{.Address}}</code></td>
-        <td>{{.EnvoyVersion}}</td>
+        <td>
+          {{.EnvoyVersion}}
+          {{if .Connected}}<span class="sub">{{if .Workers}}{{.Workers}} worker {{if eq .Workers 1}}thread{{else}}threads{{end}}{{else}}worker threads not declared{{end}}</span>{{end}}
+        </td>
         <td>{{ago $now .LastSeen}}</td>
         <td>
           {{memberState .Member}}

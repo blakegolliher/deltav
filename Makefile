@@ -108,13 +108,25 @@ live: envoy
 	@set -a && . "$(ENV)" && set +a && \
 		ENVOY_BIN=$(abspath $(ENVOY_BIN)) $(GO) test -tags 'integration live' -count=1 -v -run TestLiveVASTThroughEnvoy ./test/integration/...
 
+# Installs the binary, the two systemd units and, if they are not there yet,
+# the example environment files. The units expect the binary in
+# /usr/local/bin; with another PREFIX the paths in them are rewritten.
+UNITDIR ?= $(PREFIX)/lib/systemd/system
+ETCDIR  ?= /etc/deltav
+
 install: build
-	install -d $(DESTDIR)$(PREFIX)/bin
+	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(UNITDIR) $(DESTDIR)$(ETCDIR)
 	install -m 0755 $(BINDIR)/deltav $(DESTDIR)$(PREFIX)/bin/deltav
 	ln -sf deltav $(DESTDIR)$(PREFIX)/bin/dv
+	for u in deltav.service deltav-envoy.service; do \
+		sed 's|/usr/local/bin/|$(PREFIX)/bin/|' packaging/systemd/$$u > $(DESTDIR)$(UNITDIR)/$$u && chmod 0644 $(DESTDIR)$(UNITDIR)/$$u; \
+	done
+	test -e $(DESTDIR)$(ETCDIR)/deltav.env || install -m 0600 packaging/systemd/deltav.env.example $(DESTDIR)$(ETCDIR)/deltav.env
+	test -e $(DESTDIR)$(ETCDIR)/envoy.env || install -m 0644 packaging/systemd/envoy.env.example $(DESTDIR)$(ETCDIR)/envoy.env
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/deltav $(DESTDIR)$(PREFIX)/bin/dv
+	rm -f $(DESTDIR)$(UNITDIR)/deltav.service $(DESTDIR)$(UNITDIR)/deltav-envoy.service
 
 clean:
 	rm -rf $(BINDIR)

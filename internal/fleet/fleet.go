@@ -48,6 +48,11 @@ type Member struct {
 	ConnectedAt    time.Time  `json:"connected_at"`
 	DisconnectedAt *time.Time `json:"disconnected_at,omitempty"`
 	LastSeen       time.Time  `json:"last_seen"`
+	// Workers is how many worker threads the Envoy says it runs, in its
+	// node metadata (WorkersMetadataKey); 0 if it does not say. The client
+	// unit sets it from the same variable as Envoy's --concurrency. The
+	// enforce-mode share allows for it (DESIGN.md, amendments 34 and 40).
+	Workers int `json:"workers,omitempty"`
 
 	// ConfigVersion is the version every subscribed type has ACKed, or ""
 	// while types disagree or none has answered. ConfigState is the worst
@@ -115,6 +120,41 @@ func (r *Registry) StreamOpen(id int64, peerAddr string) {
 	r.streams[id] = &stream{peer: peerAddr, opened: r.now(), nonce: map[string]string{}}
 }
 
+// WorkersMetadataKey is the node metadata field in which an Envoy declares
+// how many worker threads it runs. Envoy does not report that by itself.
+const WorkersMetadataKey = "deltav_workers"
+
+// declaredWorkers reads WorkersMetadataKey; 0 means not declared, or not a
+// believable number.
+func declaredWorkers(node *corev3.Node) int {
+	v, ok := node.GetMetadata().GetFields()[WorkersMetadataKey]
+	if !ok {
+		return 0
+	}
+	n := v.GetNumberValue()
+	if n < 1 || n > 4096 || n != float64(int(n)) {
+		return 0
+	}
+	return int(n)
+}
+
+// Workers summarizes the worker threads of the connected Envoys: the most
+// any one declares (0 if none does), and how many do not declare any.
+func (r *Registry) Workers() (most, undeclared int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, m := range r.members {
+		if !m.Connected {
+			continue
+		}
+		if m.Workers == 0 {
+			undeclared++
+		}
+		most = max(most, m.Workers)
+	}
+	return most, undeclared
+}
+
 // Request records a discovery request: the first one on a stream registers
 // the member, and one that carries a response nonce is an ACK or a NACK.
 func (r *Registry) Request(id int64, req *discoveryv3.DiscoveryRequest) {
@@ -146,6 +186,7 @@ func (r *Registry) Request(id int64, req *discoveryv3.DiscoveryRequest) {
 			Address:      st.peer,
 			Connected:    true,
 			ConnectedAt:  st.opened,
+			Workers:      declaredWorkers(node),
 		}
 		m.streamID = id
 		m.types = map[string]*TypeStatus{}

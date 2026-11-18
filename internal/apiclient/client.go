@@ -40,6 +40,12 @@ type LimitStatus struct {
 	Computed        uint32 `json:"computed"`
 	Envoys          int    `json:"envoys"`
 	MaxVIPsPerCNode int    `json:"max_vips_per_cnode"`
+	// Workers is the most worker threads a connected Envoy declares; the
+	// share is lowered by Workers - 1. Undeclared counts Envoys that do not
+	// say. Holds is false when no share keeps the fleet within the limit.
+	Workers    int  `json:"workers"`
+	Undeclared int  `json:"undeclared_workers"`
+	Holds      bool `json:"holds"`
 }
 
 // Usage is one CNode's requests in flight against one target's limit.
@@ -110,6 +116,7 @@ type Member struct {
 	EnvoyVersion  string    `json:"envoy_version"`
 	Address       string    `json:"address"`
 	Connected     bool      `json:"connected"`
+	Workers       int       `json:"workers"` // worker threads it declares; 0 if it does not say
 	ConnectedAt   time.Time `json:"connected_at"`
 	LastSeen      time.Time `json:"last_seen"`
 	ConfigVersion string    `json:"config_version"`

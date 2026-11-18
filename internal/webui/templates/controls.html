@@ -32,10 +32,11 @@
           </p>
           {{if eq .Mode "enforce"}}
           <p class="sub">
-            Each Envoy may hold {{count .Share}} to each VIP: {{count .PerCNode}} ÷ {{count .Envoys}} {{if eq .Envoys 1}}Envoy{{else}}Envoys{{end}} ÷ {{count .MaxVIPsPerCNode}} {{if eq .MaxVIPsPerCNode 1}}VIP{{else}}VIPs{{end}} on one CNode.
+            Each Envoy's cap is {{count .Share}} per VIP: {{count .PerCNode}} ÷ {{count .Envoys}} {{if eq .Envoys 1}}Envoy{{else}}Envoys{{end}} ÷ {{count .MaxVIPsPerCNode}} {{if eq .MaxVIPsPerCNode 1}}VIP{{else}}VIPs{{end}} on one CNode{{if gt .Workers 1}}, less {{less1 .Workers}} for worker threads{{end}}.
             {{if ne .Share .Computed}}A new cap of {{count .Computed}} is held back for now (point 2).{{end}}
           </p>
-          {{if overcommitted .}}<p class="sub">{{badge "warn" "Cannot hold"}} {{count .Envoys}} Envoys × {{count .MaxVIPsPerCNode}} VIPs is more than the limit, and no Envoy can be given less than 1 (point 1).</p>{{end}}
+          {{if not .Holds}}<p class="sub">{{badge "warn" "Cannot hold"}} {{count .Envoys}} {{if eq .Envoys 1}}Envoy{{else}}Envoys{{end}} × {{count .MaxVIPsPerCNode}} {{if eq .MaxVIPsPerCNode 1}}VIP{{else}}VIPs{{end}}{{if gt .Workers 1}} × {{count .Workers}} worker threads{{end}} is more than the limit, and no cap is below 1 (points 1 and 3).</p>{{end}}
+          {{if .Undeclared}}<p class="sub">{{badge "warn" "Workers unknown"}} {{count .Undeclared}} connected {{if eq .Undeclared 1}}Envoy does{{else}}Envoys do{{end}} not say how many worker threads {{if eq .Undeclared 1}}it runs{{else}}they run{{end}}, and can exceed the cap by that number less one (point 3).</p>{{end}}
           {{end}}
           {{else}}
           <p class="control-state quiet">No limit</p>
@@ -80,7 +81,7 @@
       <ol>
         <li><strong>The cap is each Envoy's own.</strong> An Envoy cannot see what other hosts hold, so the limit is divided: limit ÷ connected Envoys ÷ the most VIPs of the target on one CNode, rounded down but never below 1. A CNode with fewer VIPs gets less than the limit. Once Envoys × VIPs is more than the limit, the fleet can exceed it; that is still reported.</li>
         <li><strong>A new cap makes every Envoy reconnect.</strong> The cap is part of the target's cluster config in Envoy, and changing it makes Envoy close and reopen its connections for that target as requests finish. So as Envoys come and go, a recomputed cap is sent only when it differs from the one in force by more than {{percent .Settings.LimitMinChange}}, and no sooner than {{seconds .Settings.LimitMinIntervalSeconds}} after the last. A limit you set here is sent at once.</li>
-        <li><strong>The cap is exact only for an Envoy with one worker thread.</strong> Each further worker can hold one more connection to a VIP than the cap. Envoy starts a worker per core unless it is given <code>--concurrency</code>.</li>
+        <li><strong>Each worker thread of an Envoy can hold one connection more than the cap.</strong> Envoy lets a worker with no connection to a VIP open one, whatever the cap says. The client unit tells the daemon how many workers its Envoy runs (<code>DELTAV_ENVOY_WORKERS</code>, which also sets Envoy's <code>--concurrency</code>), and the cap is lowered by that number less one, so the limit still holds. An Envoy started another way does not say, and can exceed its cap by its worker count less one.</li>
       </ol>
     </aside>
   </div>

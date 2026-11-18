@@ -5,13 +5,13 @@ the VIPs of one or more VAST clusters, with no proxy machines in the data path. 
 endpoints over xDS, collects telemetry from every Envoy over the streams Envoy opens, and shows
 what the fleet and the CNodes are doing.
 
-**Status: proof of concept; milestones 1 to 7 of 8 are done.** Still to come: packaging with a
-quick start (8). The daemon reads healthy endpoints from VAST clusters (or takes a static list),
-serves them to Envoy over xDS and tracks every connected Envoy; it ingests Envoy's access logs and
-load reports and keeps rolling per-endpoint, per-CNode and per-Envoy stats, served by the
-`/api/v1` endpoints below and `/metrics`; a web UI, a terminal UI and the CLI all read that API;
-`deltav bootstrap` prints the client bootstrap; a test harness (`dvlab`) provides fake S3
-backends, a mock VAST API and a load generator. See [docs/DESIGN.md](docs/DESIGN.md).
+**Status: proof of concept; all eight milestones of the build plan are done.** The daemon reads
+healthy endpoints from VAST clusters (or takes a static list), serves them to Envoy over xDS and
+tracks every connected Envoy; it ingests Envoy's access logs and load reports and keeps rolling
+per-endpoint, per-CNode and per-Envoy stats, served by the `/api/v1` endpoints below and
+`/metrics`; a web UI, a terminal UI and the CLI all read that API; limits and drain act on the
+fleet; systemd units run the daemon and the clients' Envoys; a test harness (`dvlab`) provides
+fake S3 backends, a mock VAST API and a load generator. See [docs/DESIGN.md](docs/DESIGN.md).
 
 The binary is `deltav`, also installed as `dv`; the two behave identically.
 
@@ -34,6 +34,74 @@ sudo make install # /usr/local/bin/deltav and dv
 `go build ./cmd/deltav` also works on its own: the web UI's stylesheet is committed. After
 changing a page template or `internal/webui/tailwind.css`, run `make css`, which fetches the
 pinned Tailwind standalone CLI (no Node) and regenerates it.
+
+## Quick start
+
+Ten minutes, given: a Linux host for the daemon that the clients can reach on TCP port 18000; a
+VAST cluster with a VIP pool that serves S3, and a user who can read its management API; client
+hosts that can reach that pool's VIPs.
+
+**1. The daemon, on one host.**
+
+```sh
+make build && sudo make install     # the binary, deltav.service, /etc/deltav/deltav.env
+sudo systemctl daemon-reload && sudo systemctl enable --now deltav
+```
+
+It listens for Envoys on `0.0.0.0:18000` and serves its API and web UI on `127.0.0.1:18080`.
+(Without Go on that host, build elsewhere and copy `bin/deltav`; `deltav unit daemon` prints the
+unit and `deltav unit daemon-env` the settings file.)
+
+**2. A VAST cluster and a target.** The password is asked for if it is not in `DELTAV_PASSWORD`.
+
+```sh
+deltav vast add lab --host vast.example.com --user admin
+deltav vast pools lab                                         # find the pool that serves S3
+deltav target add s3 --cluster lab --pool main --port 80 --listen-port 9000
+```
+
+**3. Envoy on every client.** The daemon host makes the two files that every client gets, the
+same on all of them:
+
+```sh
+deltav bootstrap --xds-address <daemon host>:18000 > envoy.json
+deltav unit client > deltav-envoy.service
+```
+
+On each client (by hand here; a fleet gets them from its configuration management):
+
+```sh
+curl -fsSL -o envoy https://github.com/envoyproxy/envoy/releases/download/v1.40.2/envoy-1.40.2-linux-x86_64
+echo "1d64506e25c1844f146162ddb2ece7010fa4e784faddb40a079021491f1f03cc  envoy" | sha256sum -c -
+sudo install -m 0755 envoy /usr/local/bin/envoy
+sudo install -D -m 0644 envoy.json /etc/deltav/envoy.json
+sudo install -m 0644 deltav-envoy.service /etc/systemd/system/deltav-envoy.service
+sudo systemctl daemon-reload && sudo systemctl enable --now deltav-envoy
+```
+
+(On arm64 the file is `envoy-1.40.2-linux-aarch_64` and its SHA-256
+`b9d6d1e06dd5838a3506de9f4deebad3de9a2ce6cadb87cd76222ca286213baf`.)
+
+**4. Use it.** On the daemon host, `deltav fleet list` shows each client by its host name once
+its Envoy has connected and accepted the config. On a client, S3 is now at
+`http://127.0.0.1:9000`, with path-style addressing:
+
+```sh
+aws configure set default.s3.addressing_style path
+aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://my-bucket/
+```
+
+**5. Watch it.** `deltav tui` on the daemon host, or the web UI: `ssh -L
+18080:127.0.0.1:18080 <daemon host>` and open `http://localhost:18080/`. Limits and drain are
+under Controls there, and described below.
+
+The units: `deltav.service` runs the daemon as a user of its own whose only writable directory is
+`/var/lib/deltav` (the state file there holds the VAST password). `deltav-envoy.service` runs
+Envoy with the host's name as its name in the fleet, restarts it if it stops, and takes one
+setting, `DELTAV_ENVOY_WORKERS` in `/etc/deltav/envoy.env` (default 2): Envoy's worker threads.
+More threads carry more traffic; "Limits and drain" below says what they cost an enforced limit.
+Restarting Envoy ends the S3 requests in flight through it. If the daemon is down, Envoys keep
+their last config and S3 keeps working; only telemetry is lost.
 
 ## Attach a VAST cluster
 
@@ -79,10 +147,13 @@ request per connection, and idle keep-alive connections are not counted.
   by more than a fifth and not within a minute of the last (`serve --limit-min-change`,
   `--limit-min-interval`). A change you make yourself is pushed at once.
 
-  The cap is exact only for an Envoy started with `--concurrency 1`. Each further worker thread
-  can hold one more connection to a VIP than the cap allows, and Envoy starts one worker per
-  core unless told otherwise, so on a many-core client a small cap hardly binds. Alert mode
-  reports the real numbers either way.
+  And each worker thread of an Envoy can hold one connection to a VIP beyond its cap: Envoy
+  lets a thread with no connection to a VIP open one, whatever the cap. The client unit tells
+  the daemon how many threads its Envoy runs, and the cap is lowered by that number less one, so
+  the limit holds; the price of more threads is a lower cap, and with too many for the limit
+  (Envoys × VIPs on one CNode × threads above it) no cap can hold it, which the status says. An
+  Envoy started some other way does not say how many threads it has, is counted as "workers
+  unknown", and can exceed its cap by that number less one.
 
 Drain is Delta-V's own setting: nothing changes on the VAST cluster. Envoys stop sending a
 drained CNode new requests at once, and requests in flight finish. Limits and drains survive a
@@ -143,7 +214,8 @@ export AWS_ACCESS_KEY_ID=dvlab AWS_SECRET_ACCESS_KEY=dvlab-secret   # any pair; 
 bin/dvlab fakes3 --listen 127.0.0.11:9100,127.0.0.12:9100,127.0.0.13:9100 &
 bin/deltav serve --state-dir ./state --static-target s3:9000:127.0.0.11:9100,127.0.0.12:9100,127.0.0.13:9100 &
 bin/deltav bootstrap --xds-address 127.0.0.1:18000 > bootstrap.json
-.cache/envoy/envoy-1.40.2-linux-x86_64 -c bootstrap.json --service-node "$(hostname)" &
+.cache/envoy/envoy-1.40.2-linux-x86_64 -c bootstrap.json --service-node "$(hostname)" \
+    --concurrency 2 --config-yaml 'node: {metadata: {deltav_workers: 2}}' &   # as the client unit does
 
 curl -s 127.0.0.1:18080/api/v1/fleet  # the Envoy, its version and whether it accepted the config
 bin/dvlab loadgen --endpoint http://127.0.0.1:9000 --bucket lab --requests 1000 \
