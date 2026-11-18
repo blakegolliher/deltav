@@ -410,8 +410,24 @@ type loginView struct {
 
 // localPath returns next if it is a path on this site, and "/" otherwise,
 // so the login form cannot be made to send anyone elsewhere.
+//
+// A browser does not read an address the way a server does. It drops tabs
+// and line breaks from anywhere inside it and takes a backslash for a
+// slash, so "/\t/evil.example" and "/\\evil.example" both lead off the
+// site as "//evil.example". Anything with a control character or a
+// backslash is refused outright, and the rest must parse as a path and
+// nothing more.
 func localPath(next string) string {
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.ContainsAny(next, "\\\r\n") {
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.Contains(next, "\\") {
+		return "/"
+	}
+	for _, c := range next {
+		if c < 0x20 || c == 0x7f {
+			return "/"
+		}
+	}
+	u, err := url.Parse(next)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || strings.HasPrefix(u.Path, "//") {
 		return "/"
 	}
 	return next

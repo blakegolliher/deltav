@@ -136,6 +136,12 @@ func TestLocalPath(t *testing.T) {
 	for in, want := range map[string]string{
 		"": "/", "/": "/", "/fleet?state=nacked": "/fleet?state=nacked",
 		"//evil.example/x": "/", "https://evil.example/": "/", "/\\evil.example": "/", "fleet": "/", "/a\r\nSet-Cookie: x": "/",
+		// A browser drops tabs and line breaks from an address, wherever
+		// they are, before it reads it: these would all be //evil.example.
+		"/\t/evil.example/x": "/", "/\n/evil.example": "/", "/\r/evil.example": "/", "\t//evil.example": "/", "/\x00/evil.example": "/",
+		"/\x7f/evil.example": "/", "/fleet\t": "/", "/%zz": "/",
+		"/cnodes?window=5m&sort=in_flight": "/cnodes?window=5m&sort=in_flight", "/controls#rules-title": "/controls#rules-title",
+		"/%09/evil.example/x": "/%09/evil.example/x", // still encoded: a path on this site
 	} {
 		if got := localPath(in); got != want {
 			t.Errorf("localPath(%q) = %q, want %q", in, got, want)
