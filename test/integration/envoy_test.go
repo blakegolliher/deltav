@@ -149,9 +149,20 @@ func daemon(t *testing.T, targets ...xds.TargetSpec) *server.Server {
 	return s
 }
 
+// envoyWorkers is how many worker threads the tests' Envoys run unless a
+// test asks otherwise. More than one, so that what holds only for a single
+// worker does not pass by accident.
+const envoyWorkers = 2
+
 // envoy starts one real Envoy with the bootstrap `deltav bootstrap` prints,
 // naming itself through --service-node as a client host's unit does.
 func envoy(t *testing.T, s *server.Server, nodeID string) {
+	t.Helper()
+	envoyWith(t, s, nodeID, envoyWorkers)
+}
+
+// envoyWith is envoy with a chosen number of worker threads.
+func envoyWith(t *testing.T, s *server.Server, nodeID string, workers int) {
 	t.Helper()
 	dir := t.TempDir()
 	boot, err := xds.BootstrapJSON(xds.BootstrapOptions{XDSAddress: s.GRPCAddr()})
@@ -167,7 +178,7 @@ func envoy(t *testing.T, s *server.Server, nodeID string) {
 		"-c", bootPath,
 		"--service-node", nodeID,
 		"--disable-hot-restart", // several Envoys on one host; no shared memory to collide on
-		"--concurrency", "2",
+		"--concurrency", strconv.Itoa(workers),
 		"--log-level", "info",
 		"--log-path", logPath,
 	)
@@ -884,6 +895,12 @@ func sendAPI(t *testing.T, s *server.Server, method, path string, body any) {
 // mock, the backends, the CNode behind each backend, and the listener port.
 func vastTarget(t *testing.T, cfg lab.FakeS3Config) (*server.Server, *vasttest.Server, []*lab.FakeS3, []string, uint32) {
 	t.Helper()
+	return vastTargetWith(t, cfg, envoyWorkers)
+}
+
+// vastTargetWith is vastTarget with a chosen number of Envoy worker threads.
+func vastTargetWith(t *testing.T, cfg lab.FakeS3Config, workers int) (*server.Server, *vasttest.Server, []*lab.FakeS3, []string, uint32) {
+	t.Helper()
 	cfgs := make([]lab.FakeS3Config, 6)
 	for i := range cfgs {
 		cfgs[i] = cfg
@@ -912,7 +929,7 @@ func vastTarget(t *testing.T, cfg lab.FakeS3Config) (*server.Server, *vasttest.S
 	postAPI(t, s, "/api/v1/targets", map[string]any{
 		"name": "main", "cluster": "lab", "pool": "main", "port": eps[0].Port, "listen_port": port,
 	})
-	envoy(t, s, "it-envoy-1")
+	envoyWith(t, s, "it-envoy-1", workers)
 	waitMember(t, s, "it-envoy-1", "connected and in sync", inSync)
 	waitListener(t, port)
 	return s, mock, fakes, mock.PoolCNodes("main"), port
@@ -936,23 +953,19 @@ func over(t *testing.T, s *server.Server) []string {
 	return out
 }
 
-// Milestone 7, enforce mode: the per-Envoy cap really holds each backend to
-// its share; excess requests wait and are not failed; taking the cap away
-// under load (which rebuilds Envoy's cluster) fails nothing; and with no
-// cap the same load goes over the limit, which alert mode reports.
-func TestLimitEnforceThroughEnvoy(t *testing.T) {
-	// Slow backends, so that requests pile up.
-	s, _, fakes, _, port := vastTarget(t, lab.FakeS3Config{Latency: 100 * time.Millisecond})
-
-	// One Envoy, two VIPs per CNode, limit 6: each VIP may have 3 at once.
+// enforced sets the target's limit to 6 per CNode in enforce mode (one
+// Envoy, two VIPs per CNode: a share of 3 per VIP), runs 48 workers through
+// the listener for 5 seconds, and returns the most requests each backend
+// had at once. Nothing may fail, and the API must not report a CNode over
+// the limit unless allowOver.
+func enforced(t *testing.T, s *server.Server, fakes []*lab.FakeS3, port uint32, allowOver bool) []int64 {
+	t.Helper()
 	sendAPI(t, s, http.MethodPut, "/api/v1/targets/main/limit", map[string]any{"per_cnode": 6, "mode": "enforce"})
 	waitMember(t, s, "it-envoy-1", "in sync with the limit", inSync)
 	time.Sleep(2500 * time.Millisecond) // let load reporting pick up the rebuilt cluster (DESIGN.md, amendment 20)
 	for _, f := range fakes {
 		f.ResetMaxInFlight()
 	}
-
-	// 48 workers against a fleet-wide allowance of 18.
 	done := make(chan *lab.LoadResult, 1)
 	go func() {
 		done <- load(t, port, func(c *lab.LoadConfig) { c.Requests, c.Duration, c.Concurrency, c.Size = 0, 5*time.Second, 48, 4096 })
@@ -967,22 +980,50 @@ func TestLimitEnforceThroughEnvoy(t *testing.T) {
 		}
 	}
 	requireClean(t, res)
-	for i, f := range fakes {
-		if got := f.Stats().MaxInFlight; got > 3 || got == 0 {
-			t.Errorf("backend %d had up to %d requests at once; the cap is 3 per VIP", i, got)
-		}
-	}
-	if len(seenOver) > 0 {
+	if len(seenOver) > 0 && !allowOver {
 		t.Errorf("the API reported CNodes over the limit while it was enforced: %v", seenOver)
 	}
-	t.Logf("enforced: %d requests, p50 %.0f ms, p99 %.0f ms; most at once per backend: %v", res.Requests, res.Latency.P50, res.Latency.P99,
-		func() []int64 {
-			out := make([]int64, len(fakes))
-			for i, f := range fakes {
-				out[i] = f.Stats().MaxInFlight
-			}
-			return out
-		}())
+	most := make([]int64, len(fakes))
+	for i, f := range fakes {
+		most[i] = f.Stats().MaxInFlight
+	}
+	t.Logf("enforced: %d requests, p50 %.0f ms, p99 %.0f ms; most at once per backend: %v; reported over: %v",
+		res.Requests, res.Latency.P50, res.Latency.P99, most, seenOver)
+	return most
+}
+
+// Milestone 7, enforce mode, with one Envoy worker thread: the cap holds
+// each backend to exactly its share, and excess requests wait and are not
+// failed.
+func TestLimitEnforceExactWithOneWorker(t *testing.T) {
+	// Slow backends, so that requests pile up.
+	s, _, fakes, _, port := vastTargetWith(t, lab.FakeS3Config{Latency: 100 * time.Millisecond}, 1)
+	for i, got := range enforced(t, s, fakes, port, false) {
+		if got > 3 || got == 0 {
+			t.Errorf("backend %d had up to %d requests at once; the cap is 3 per VIP and this Envoy has one worker", i, got)
+		}
+	}
+}
+
+// Milestone 7, enforce mode, with two Envoy worker threads. Envoy lets
+// every worker open one connection to a host whatever the cap says, so a
+// backend can have up to share + workers - 1 requests at once (DESIGN.md,
+// amendment 34). Also: taking the cap away under load (which rebuilds
+// Envoy's cluster) fails nothing; and with no cap the same load goes over
+// the limit, which alert mode reports.
+func TestLimitEnforceThroughEnvoy(t *testing.T) {
+	s, _, fakes, _, port := vastTarget(t, lab.FakeS3Config{Latency: 100 * time.Millisecond})
+	const bound = 3 + envoyWorkers - 1
+	// A CNode has two VIPs, so it can be over its limit of 6 by as much as
+	// the workers add: the API may say so, and that is the truth.
+	for i, got := range enforced(t, s, fakes, port, true) {
+		if got > bound || got == 0 {
+			t.Errorf("backend %d had up to %d requests at once; the cap is 3 per VIP and %d workers allow at most %d", i, got, envoyWorkers, bound)
+		}
+	}
+	done := make(chan *lab.LoadResult, 1)
+	var res *lab.LoadResult
+	var seenOver []string
 
 	// The same load again; a second in, the limit goes back to alert. That
 	// removes the cap, which makes Envoy rebuild the cluster and its pools
@@ -1007,10 +1048,10 @@ func TestLimitEnforceThroughEnvoy(t *testing.T) {
 	requireClean(t, res)
 	uncapped := false
 	for _, f := range fakes {
-		uncapped = uncapped || f.Stats().MaxInFlight > 3
+		uncapped = uncapped || f.Stats().MaxInFlight > bound
 	}
 	if !uncapped {
-		t.Error("with the cap removed no backend had more than 3 requests at once: was it really removed?")
+		t.Errorf("with the cap removed no backend had more than %d requests at once: was it really removed?", bound)
 	}
 	if len(seenOver) == 0 {
 		t.Error("48 workers against a limit of 6 per CNode, unenforced, and the API never reported a CNode over the limit")

@@ -208,10 +208,22 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     cluster. If that empties a target it does so at once: the three-poll hold of amendment 23 is
     for odd answers from VAST, not for an operator's decision. Nothing is changed on VAST, and the
     name must be a CNode the cluster has, so a typo cannot sit in the state doing nothing.
-33. **Still to be seen against real Envoy** (the tests exist and have not been run): that the cap
-    holds each VIP to its share and makes excess requests wait, not fail; that removing the cap
-    under load, which rebuilds Envoy's cluster (amendment 12), fails nothing; and that draining
-    under load fails nothing.
+33. **Seen against real Envoy** (2026-11-18, Envoy 1.40.2). At its cap an Envoy makes requests
+    wait and fails none. Removing the cap under load, which rebuilds Envoy's cluster (amendment
+    12), fails nothing. Draining a CNode under load fails nothing. The cap itself holds only as
+    far as amendment 34 says.
+34. **The cap leaks by one connection per extra worker thread.** Envoy counts a host's
+    connections across its worker threads, but a worker whose own pool to that host is empty may
+    always open one, whatever the count ("always create one, to prevent pending streams being
+    queued to this upstream with no way to be processed": `tryCreateNewConnection` in
+    `source/common/conn_pool/conn_pool_base.cc`). An Envoy with *W* workers can therefore hold
+    share + *W* − 1 connections to a VIP. Observed with a share of 3: one worker, 3 at most on
+    every backend; two workers, 4 on some. So enforce mode is exact only for Envoys started with
+    `--concurrency 1`. Envoy's default is one worker per core, and on a many-core client a small
+    share then hardly binds. Alert mode counts what really happens either way. **Not built yet:**
+    the share does not allow for workers, because the daemon does not know how many each Envoy
+    runs. Milestone 8 writes the client unit, which is where `--concurrency` is set; the choice
+    there (few workers and a tight cap, or many and a loose one) is the user's.
 
 ## Known gaps (POC)
 

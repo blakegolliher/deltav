@@ -78,6 +78,11 @@ request per connection, and idle keep-alive connections are not counted.
   by more than a fifth and not within a minute of the last (`serve --limit-min-change`,
   `--limit-min-interval`). A change you make yourself is pushed at once.
 
+  The cap is exact only for an Envoy started with `--concurrency 1`. Each further worker thread
+  can hold one more connection to a VIP than the cap allows, and Envoy starts one worker per
+  core unless told otherwise, so on a many-core client a small cap hardly binds. Alert mode
+  reports the real numbers either way.
+
 Drain is Delta-V's own setting: nothing changes on the VAST cluster. Envoys stop sending a
 drained CNode new requests at once, and requests in flight finish. Limits and drains survive a
 daemon restart.
