@@ -316,7 +316,8 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     give each a sliver. So a rule's rate belongs to the whole fleet and is divided by demand
     (amendment 46). `per: client` gives each client host the whole rate; it stands where
     tollbooth has `source_ip`, which means nothing when the source is always loopback.
-45. **How a request is limited.** In each listener, ahead of the router: a Lua filter, then one
+45. **How a request is limited** (as first built; replaced by 52 to 54). In each listener,
+    ahead of the router: a Lua filter, then one
     rate limit quota filter per rule (`internal/xds/ratelimit.go`). The Lua script is generated
     from the rules (`internal/ratelimit/lua.go`): it finds the operation, the access key, the
     bucket and the key, decides which rules match, and for each sets a request header naming
@@ -326,7 +327,8 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     are removed before VAST; any a client sends are dropped first, so a client cannot pick its
     own count. Rule values reach the script as byte-escaped literals. A script error lets the
     request through.
-46. **How the rate is divided.** Envoy's quota filter reports, per bucket, requests allowed and
+46. **How the rate is divided** (the idle share and the last sentence are replaced by 59 and
+    60). Envoy's quota filter reports, per bucket, requests allowed and
     refused, and takes a token bucket in return, over one gRPC stream to the daemon
     (`internal/ratelimit/server.go`). No request waits on it. For each bucket the daemon
     divides the rule's rate among the Envoys that have it open: what each asks for (allowed
@@ -343,7 +345,8 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     limiter behind it; that behaviour must be allow-all or deny-all. `RequestsPerTimeUnit`
     assignments are not implemented. The filter and `RateLimitStrategy` are marked
     work-in-progress upstream and Envoy logs a warning saying so.
-48. **Failing open.** A new bucket lets requests through until the daemon's first answer, a
+48. **Failing open** (the lifetimes are replaced by 56). A new bucket lets requests through
+    until the daemon's first answer, a
     matter of milliseconds. A share lasts 20 s and is renewed every 5. If the daemon is gone,
     each Envoy then applies a rule's whole rate by itself for ten minutes, and after that the
     rule is not enforced until the daemon returns. Past 100,000 keys for one rule, new keys are
@@ -355,7 +358,8 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     and the two together let 259 through in 12 s; the rate raised under load, with no failed
     request; a blocked rule refused everything with the status it names; the backend never saw
     the script's headers; with the rules removed traffic was byte-exact again.
-50. **Not built, or not as tollbooth has it.** `Retry-After` is always 1: the wait is not known
+50. **Not built, or not as tollbooth has it** (its last two sentences are replaced by 52 and
+    60). `Retry-After` is always 1: the wait is not known
     where the answer is made. The error document has no `Resource` or `RequestId`. No
     `source_ip` filter, no `rules test`, no observe-only rules. Virtual-host-style requests
     are not recognized (clients of a loopback address use path-style). Adding or removing a
@@ -372,6 +376,106 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     not in botocore's list of throttling errors and 429 is not among the statuses it treats as
     transient. So `respond: 429` suits blocked rules and little else for AWS SDK clients. Not
     tried: multipart transfers and listings (the fake backend has neither), other SDKs, boto3.
+
+52. **Rules travel in the route, not the listener** (replaces 45, and the last lines of 50).
+    Envoy applies a changed listener to new connections only; the old ones live on under the
+    old listener until they close or its drain time runs out, ten minutes by default. An S3
+    client keeps its connections. Seen on 2026-11-18: a connection opened before a rule
+    blocked PutObject was still passing PUTs 50 s later. So the listener now holds only what
+    never changes: a Lua filter with no script, then four rate limit quota filters ("slots"),
+    then the router (`internal/xds/ratelimit.go`). The route table is a resource of its own,
+    fetched by name over ADS (RDS), and carries the rules: the generated script, as the Lua
+    filter's per-route configuration. Envoy applies a new route table to the next request on
+    every connection. A target with no rules turns the Lua filter and every slot off in its
+    route, removes no header, and passes a request exactly as it came.
+53. **Slots.** The script puts each rule a request matches in the next free slot, as three
+    request headers: the rule's name, what it counts the request under, and `429` if a refusal
+    is to be one. Slot *j*'s quota filter knows nothing of any rule; it counts a request that
+    has slot *j*'s headers in the bucket `{rule, key}` they name, and refuses with the status
+    they name. All slots share one bucket cache and one stream to the daemon, because Envoy
+    keys those by server and domain (`filter_persistence.h`), so a rule's count is the same
+    count whichever slot it lands in. The price: one request can be limited by at most
+    `ratelimit.Slots` (4) rules. One that matches more is limited by the first four in the
+    order of the rules, and the script notes it in the request's metadata. Four, because each
+    slot is a filter every request under any rule passes through.
+54. **Blocked rules are the script's.** A request that matches a blocked rule is answered by
+    the script itself, wherever the rule comes in the order, with the same S3 error document
+    the quota filters send. Nothing is asked of the daemon, so a blocked rule holds whether or
+    not the daemon can be reached, and takes no slot. The daemon learns of each refusal from
+    the access log (57).
+55. **Config must render to the same bytes every time.** Found while doing 52: a filter's
+    config packed with `anypb.New` writes a map's entries in whatever order Go hands them
+    over, so a listener with a quota filter came out as different bytes from one render to the
+    next. The snapshot then looked changed when it was not, and Envoy, which compares what it
+    is sent with what it has, replaced the listener. Every message is now packed
+    deterministically (`toAny`), and `TestRenderingIsStable` renders each resource fifty times.
+56. **A share lasts ten minutes and is renewed every two and a half** (replaces 48). There is
+    no fallback strategy any more: a slot cannot name a rule's rate, and the old fallback gave
+    every Envoy the rule's whole rate. Instead, when the daemon is away each Envoy goes on
+    with the share it has, and the shares still add up to the rule. After ten minutes without
+    the daemon, and for a count first opened while it is away, the count is not limited. Seen
+    on 2026-11-18 with two Envoys under 20 GetObject a second and the daemon stopped for 35 s
+    of a 75 s run: 1,541 allowed, 20.5 a second, no failed connection, no warnings on restart.
+57. **Refusals are not the target's requests.** A refusal is Envoy's own answer, and was being
+    logged and counted as a request to the target and as one of its 503s: under a rule of 20
+    a second the overview showed 2,610 requests and 2,592 503s a second for a backend seeing
+    20. The daemon now tells a refusal by the quota filter's response code details
+    (`rate_limited_by_quota`) or the script's note of the blocked rule, and counts it apart:
+    not in a target's or a client host's requests, statuses, bytes or latency, but as
+    `refused` beside them. Refusals still reach the daemon one by one, by the owner's
+    decision, and the latest thousand are kept (`/api/v1/refusals`, `deltav rule refusals`)
+    with the operation, access key and bucket the script noted. For a request over a limit
+    that several rules counted, Envoy does not say which refused it; the record names them
+    all.
+58. **A count is kept until its tokens would be full again.** The daemon used to tell an
+    Envoy to forget a count after 30 s of silence whatever the rule, and a forgotten count
+    comes back with a full burst: 6 an hour with a burst of 3 let 12 through in 94 s. It now
+    waits until the tokens that Envoy holds would have refilled anyway (burst divided by rate,
+    and never under 30 s). Seen with Envoy: 12 an hour, burst 3; 4 passed, and after 40 s of
+    silence none.
+59. **What idle Envoys are held, and when a burst cannot hold** (replaces part of 46). An
+    Envoy that has a count open and sends nothing is counted as asking for a tenth of the rate
+    divided by the number of Envoys, where it was a quarter: however many sit idle, the busy
+    keep nine tenths. The burst is divided to add up exactly while there are no more Envoys
+    than the burst. Each Envoy must have a burst of at least one, so beyond that the bursts add
+    up to the number of Envoys; a rule in that state says so (`holds: false`, with the
+    number), as a connection limit does. Rates are written as tokens over up to a hundred
+    years, so that a very small share is not rounded up to one an hour: 400 Envoys sharing 20
+    an hour are given shares that add up to 20 an hour. Not changed: the first request of a
+    newly opened count passes before the daemon has answered.
+60. **The quota service's work** (replaces the last sentence of 46). A count's shares are
+    worked out at most once a second however many Envoys report it, and at once when an Envoy
+    joins or leaves a count that few have open. A report that changes nothing is answered to
+    nobody. An Envoy is sent its share in answer to its own report if it differs by more than
+    a hundredth from what it holds, and unasked if by more than a tenth. A count of a rule
+    that is gone, or blocked, or past the 100,000-key bound, is answered with "forget it" and
+    not left for the Envoy to report for ever. Demand is measured by the daemon's clock, not
+    the whole seconds Envoy reports. A rule's status is worked out once a second for
+    everyone who asks. A changed rule reaches the quota service before Envoy, so that the
+    first report of its count finds the rule known; and one lock is held across a rule change
+    and its undoing.
+61. **The bucket is what a server would take it to be.** The script compared the bucket as
+    the bytes on the wire, while it decoded the key: `/arch%69ve/k` was not bucket `archive`,
+    and slipped a blocked rule. It now decodes the bucket once and skips empty segments ahead
+    of it. And a count's name is never empty: a rule counting per bucket counts a request
+    that names none under `-`, where it used to let it through uncounted. How VAST itself
+    reads such paths has not been tried.
+62. **Counted before it is authenticated.** A request is counted for the access key it
+    claims, since Envoy cannot check a signature. Requests VAST will reject therefore use up
+    that key's limit. Sharing by demand bounds it (a host asking for everything gets an even
+    share), tollbooth has the same property, and the owner accepted it on 2026-11-18. `per:
+    access_key, client` confines it to one client host.
+63. **Smaller repairs of 2026-11-18.** The hold on a target's last endpoints (23) counted
+    every rebuild of the config, which an operator's commands also cause; it counts polls. A
+    VIP whose address is not an IP address failed the whole snapshot; it is left out and
+    counted in the target's status. The login form's `next` accepted a tab, which a browser
+    drops, giving a redirect off the site. A limit under 0.0005 a second was written as 0. The
+    fixture report's paths could hold a real address.
+64. **Decided on 2026-11-18, and left as they are.** Two Envoy worker threads by default in
+    the client unit (40), to be tuned when there is a reason. The S3 operation table stays
+    under Apache-2.0 with tollbooth's notice. Outlier ejection on five consecutive 5xx (3, 17)
+    is unchanged: the owner's answer to that question could be read either way, so nothing
+    was changed on the strength of it, and it is still to be confirmed.
 
 ## Known gaps (POC)
 

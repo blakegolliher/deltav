@@ -14,9 +14,9 @@ read that API; connection limits, drain and rate rules act on the fleet; systemd
 daemon and the clients' Envoys; a test harness (`dvlab`) provides fake S3 backends, a mock VAST
 API and a load generator. See [docs/DESIGN.md](docs/DESIGN.md).
 
-**Known problems are listed in [docs/OPEN_ITEMS.md](docs/OPEN_ITEMS.md).** Three of them bear on
-whether a rate rule can be relied on: a rule change does not reach connections that are already
-open, a slow rule can be beaten by pausing, and an encoded bucket name slips past a bucket filter.
+**What is still open is listed in [docs/OPEN_ITEMS.md](docs/OPEN_ITEMS.md)**: what a review on
+2026-11-18 found and how each finding was settled, and what has still never been run (TLS to the
+VIPs through real Envoy, the units under systemd).
 
 The binary is `deltav`, also installed as `dv`; the two behave identically.
 
@@ -176,6 +176,7 @@ deltav rule set tenant-a --access-key AKIAEXAMPLE1 --bucket training-data --pref
 deltav rule set no-deletes --operation DeleteObject,DeleteObjects --bucket archive --blocked
 deltav rule list                 # the rules, what each means in words, and what Envoys report
 deltav rule show uploads         # which access keys it is refusing most
+deltav rule refusals             # the latest requests rules refused: when, where, which rule, what
 deltav rule remove listings
 deltav rule operations           # the operation names a rule can use
 ```
@@ -184,7 +185,8 @@ deltav rule operations           # the operation names a rule can use
   `--access-key`, `--bucket` and `--prefix` are filters; a request must pass all that are given.
   A prefix is compared with the object key, or with a listing's `prefix` parameter. The access
   key comes from the request's signature (header or presigned URL, SigV4 or SigV2); `-` is a
-  request that carries none.
+  request that carries none. The bucket is taken as a server would take it: percent-decoded,
+  and past any extra leading slashes.
 - **The limit.** One of `--per-second`, `--per-minute`, `--per-hour`, or `--blocked`. `--burst`
   is how many may pass at once after a quiet spell; by default the limit's own number, so 20 per
   hour lets 20 through together.
@@ -199,10 +201,28 @@ deltav rule operations           # the operation names a rule can use
   whole rate to itself instead.
 - **What a refused request gets.** `503` with S3's own `SlowDown` error document and
   `Retry-After: 1`, which every S3 SDK treats as throttling and retries; `--respond 429` for
-  clients that want that. A request that matches several rules must be allowed by each.
-- **If the daemon is away.** Shares are good for 20 seconds. After that each Envoy applies a
-  rule's whole rate by itself for ten minutes, and after that the rule is not enforced until the
-  daemon is back. Blocked rules keep refusing throughout.
+  clients that want that. An upload that is refused also has its connection closed, as a
+  server must when it answers before reading the body; the client's retry opens another.
+- **Several rules.** A request that matches several rules must be allowed by each. At most 4
+  rules can limit one request: if it matches more, the first 4 in the order of `rule list`
+  count. A blocked rule refuses wherever it comes in the order.
+- **When a change takes effect.** On the next request of every connection, open or new: within
+  a moment of the command returning, on every client host.
+- **Whether the burst holds.** Every Envoy that has a count open must be allowed at least one
+  request at a time. So when more Envoys share one count than the rule's burst, that many can
+  pass at once, not the burst; `rule list` and both UIs say so for the rule. The rate is kept
+  regardless.
+- **What is counted.** A request is counted for what it claims to be, before VAST checks its
+  signature. Someone who knows an access key ID can therefore use up that key's limit with
+  requests VAST will reject. Where that matters, add `client` to `--per`.
+- **Refusals are not the target's traffic.** A refused request never reaches VAST. It is left
+  out of the target's request counts, its 503s and its latency, and out of each client host's;
+  it is counted under its rule, and per target as "refused". The daemon also remembers the
+  latest thousand refusals one by one (`deltav rule refusals`, `/api/v1/refusals`).
+- **If the daemon is away.** Blocked rules go on refusing. For a limit, each Envoy keeps the
+  share it had, so the fleet holds the rule as it stood; shares last ten minutes, and after
+  that limits are not enforced until the daemon is back. A count first opened while the daemon
+  is away is not limited either.
 
 How the AWS CLI takes a refusal, tried with version 2.15.31 against these rules:
 
@@ -317,13 +337,14 @@ is required when it is bound elsewhere). Stats take `?window=1m|5m|1h`.
 
 | Path | What it returns |
 |---|---|
-| `/api/v1/overview` | Per target: endpoints served, requests in flight, request and byte rates, status counts with 403 and 503 broken out, p50/p90/p99. Fleet counts. |
+| `/api/v1/overview` | Per target: endpoints served, requests in flight, request and byte rates, status counts with 403 and 503 broken out, p50/p90/p99, and apart from all of those the requests rate rules refused. Fleet counts. |
 | `/api/v1/targets` | The targets and endpoints being served to Envoys, and how each VAST target resolved. `POST` adds one, `DELETE /api/v1/targets/{name}` removes it. |
 | `/api/v1/vast` | Attached VAST clusters and the state of their polling. `POST` attaches one (the password is never returned), `DELETE /api/v1/vast/{name}` detaches it; `/api/v1/vast/{name}/pools` lists its VIP pools. |
 | `/api/v1/cnodes` | Per CNode: state from VAST, whether it is drained, VIPs hosted, requests in flight against each target's limit, and the same stats, with a row per VIP beneath. |
 | `/api/v1/targets/{name}/limit` | `PUT` sets a target's per-CNode limit and mode; `DELETE` removes it. |
 | `/api/v1/vast/{cluster}/cnodes/{cnode}/drain` | `POST` drains a CNode; `DELETE` undrains it. |
 | `/api/v1/rules` | The request-rate rules in the order they apply, each with what it means in words and what Envoys last reported (allowed and refused per second, and the access keys, buckets or prefixes it is refusing most). `PUT /api/v1/rules/{name}` adds or replaces one, `DELETE` removes it; `/api/v1/s3-operations` lists the operation names. |
+| `/api/v1/refusals` | The latest requests rules refused, newest first (`?limit=`, default 100, at most the 1,000 the daemon remembers): time, client host, target, rule, operation, access key, bucket and the status answered. |
 | `/api/v1/endpoints` | The same stats per endpoint (VIP); `?target=` narrows it. |
 | `/api/v1/fleet` | Envoys with version, last seen, config state and stats. `?limit=&offset=`, `?sort=node_id\|request_rate\|last_seen\|connected_at\|envoy_version\|config_state\|address`, `?order=asc\|desc`, `?q=` (substring), `?state=acked\|nacked\|pending`, `?connected=true\|false`. |
 | `/api/v1/fleet/{node}` | One Envoy, every window. |
@@ -344,8 +365,9 @@ keep-alive connections are not included.
 `deltav_target_cnode_limit{target,mode}`, `deltav_target_limit_share{target}`,
 `deltav_cnode_in_flight_requests{target,cluster,cnode}`, `deltav_cnode_over_limit{...}` and
 `deltav_cnode_drained{cluster,cnode}`, and for rate rules
-`deltav_rate_limit_requests_total{rule,result="allowed"|"denied"}` and
-`deltav_rate_limit_keys{rule}`. Per-Envoy series
+`deltav_rate_limit_requests_total{rule,result="allowed"|"denied"}`,
+`deltav_rate_limit_keys{rule}` and `deltav_target_refused_total{target}`. A request a rule
+refused is in the last of these and in none of the `deltav_endpoint_*` series. Per-Envoy series
 (`deltav_member_*`) are off unless the daemon runs with `--metrics-per-member`.
 
 ## S3 clients

@@ -1,193 +1,98 @@
 # Open items
 
-Bugs and unverified areas found by a review on 2026-11-18, most important first. Nothing here
-has been fixed. Twelve of the sixteen bugs are in the request-rate rules, which were written the
-same day; the older core (xDS, telemetry, VAST polling, connection limits) produced items 4 and 9.
+A review on 2026-11-18 found sixteen bugs, twelve of them in the request-rate rules written
+that day. All sixteen were dealt with the same day: fourteen fixed, one made visible where it
+cannot be fixed (5), one accepted and documented (11). The second half of this file says what
+became of each. The first half is what is still open.
 
-How each was established: **seen** means observed on real Envoy 1.40.2, **reproduced** means
-shown in a throwaway test, **read** means from reading the code only.
+How things here were established: **seen** means observed on real Envoy 1.40.2, **tested**
+means a unit test covers it, **read** means from reading code only.
 
-## High
+## Still open
 
-### 1. A rule change does not reach connections that are already open
+### Never run
 
-Adding or removing a rule, or changing what a rule matches, changes the listener's HTTP filter
-chain (`internal/xds/ratelimit.go`). Envoy applies a changed filter chain to new connections only
-and drains the old ones over its drain time, 10 minutes by default. A change to a rule's rate is
-not affected: it travels as a share from the quota service.
+- **TLS to the VIPs** has never run through real Envoy (DESIGN.md amendment 6).
+- **A real VAST cluster with a real bucket.** `make live` was run on 2026-11-18 and got as far
+  as it could: the daemon read the cluster, Envoy took the config, and all 200 uploads of the
+  run reached VAST through Envoy, spread over three CNodes and six VIPs. Every one was
+  answered `404 NoSuchBucket`: the bucket name the test was given does not exist for the keys
+  it was given. No object was created. It needs the right bucket name, and then tells us
+  what is still not known about VAST behind Envoy: whether signatures verify with Envoy's
+  lower-case header names and its `x-forwarded-proto: http`, and how VAST reads an encoded
+  bucket name or a path that starts `//` (amendment 61).
+- **The systemd units** have not been run under systemd.
+- **The web UI** has been used by its owner in one browser. What this round added to it (a
+  "Burst not kept" note on a rule, a "Left out" note on a target, new wording in two hints) has
+  not been looked at in a browser by anyone: it is covered by the template tests only.
+- **Rate rules with real clients** have been tried with the AWS CLI only, and not for multipart
+  transfers or listings, which the fake backend lacks.
 
-- **Seen.** One keep-alive connection sent a PUT every 3 s. A rule blocking PutObject was added
-  7 s in. The connection was still passing PUTs 50 s later and was never closed.
-- **Fix: large, and needs a design decision.** The rules must reach Envoy without touching the
-  listener. Directions: deliver the script through the route (RDS, `LuaPerRoute`) or ECDS, and
-  keep a fixed set of quota filters in the listener that the script assigns matching rules to;
-  refuse blocked rules in the script itself, so they hold with no daemon. A stopgap is a short
-  `--drain-time-s` in the client unit.
+### Limits of rate rules that remain
 
-### 2. Slow rules can be beaten by pausing
+By design, or by what Envoy's filter does. Each is said in the README or `rule set --help`.
 
-The quota service tells an Envoy to forget a count after six reports with no requests, which is
-30 s, whatever the rule (`idleReports`, `internal/ratelimit/server.go:250`). The next request
-opens the count again with a full burst.
+- At most 4 rules can limit one request (amendment 53). More slots are a constant away, at the
+  price of a filter each on every request.
+- The first request of a newly opened count passes before the daemon has answered. On each
+  Envoy a burst of 3 therefore lets 4 through at first (seen).
+- With more Envoys sharing a count than its burst, the burst is not kept (59). The rule says
+  so; nothing makes it hold short of a larger burst or counting per client.
+- What Envoys hold can add up to a tenth over a rule for the few seconds between two of their
+  reports, while shares move (60).
+- With the daemon away for more than ten minutes, limits are not enforced; and an Envoy cut
+  off from the daemon keeps its last share that long even if the rule has since been lowered.
+- A request is counted before VAST authenticates it (62). Accepted.
+- An upload that is refused has its connection closed by Envoy (seen). A refused GET does not.
+- For a refusal over a limit that several rules counted, the record cannot say which rule
+  refused: Envoy does not tell.
+- Envoy's rate limit quota filter is marked work-in-progress upstream, and every Envoy logs a
+  warning about it for each of the four filters when it loads a listener, rules or no rules.
+- Moving a running fleet from a build before amendment 52 replaces every listener once, and
+  with that drains its open connections once.
+- The gRPC port is unauthenticated (a known gap). Anyone who can reach it can shift shares
+  with false usage reports, or add to the refusal record with false log entries.
 
-- **Seen.** A rule of 6 GetObject per hour with a burst of 3 let 4 through, then 4 more after
-  47 s of silence, then 4 more after another 47 s: 12 in 94 s.
-- Any rule whose burst takes longer than 30 s to refill is affected, per-minute rules with a
-  large burst included.
-- **Fix: small.** Do not give a count up until it would be full again: idle for at least
-  burst ÷ rate. Tollbooth's sweeper has the same rule.
-
-### 3. An encoded or odd path slips past bucket filters and blocked rules
-
-The script compares and counts the bucket as the raw bytes of the path, while it decodes the key
-(`internal/ratelimit/lua.go:225`). `/arch%69ve/k` is therefore not bucket `archive`. Separately,
-when the only thing a rule counts per is empty (no bucket: `GET /`, or a path starting `//`), the
-script sets the rule's header to an empty string, which the quota filter does not match, so the
-request is not limited at all (`lua.go:248`).
-
-- **Reproduced** in the script. Whether VAST decodes the bucket, or accepts `//bucket/key`, has
-  not been tried. S3 servers normally decode the path, and Envoy passes it byte for byte.
-- **Fix: small.** Decode the bucket once, as the key is, and never emit an empty count name.
-  Tollbooth takes the bucket raw too, so it may have the same gap.
-
-### 4. One odd VAST answer plus two operator commands can empty a target
-
-A pool that suddenly resolves to no endpoints is not believed until three polls agree
-(DESIGN.md amendment 23). The counter is advanced by every rebuild of the config, not by polls
-(`internal/server/poller.go:372`), and commands such as `rule set`, `limit set`, `node drain` and
-`target add` rebuild it too. One empty answer and two commands within the poll interval push an
-empty endpoint list, and every Envoy answers 503 for that target until the next good poll.
-
-- **Read.**
-- **Fix: small.** Count polls: advance the counter only when the cluster's view is newer.
-
-## Medium
-
-### 5. Low-rate rules shared by many Envoys admit several times their limit
-
-Every Envoy that has a count open is given at least one token per hour and a burst of at least
-one (`internal/ratelimit/share.go:96`, `burstShare`), and one request passes when a count is
-first opened, before the share arrives. With 50 Envoys a rule of 20 per hour hands out 102 per
-hour and a burst of 102. Nothing reports it, unlike the connection limit's "cannot hold".
-
-- **Reproduced.** The extra first request was also **seen** (4 passed with a burst of 3).
-- **Fix: medium.** Plan it with item 10: both are about what an idle Envoy is given. At least
-  say in the rule's status when the Envoys holding a count outnumber what the rule allows.
-
-### 6. Refused requests are counted as the target's own traffic and 503s
-
-A refusal is a response Envoy makes itself, and it is logged and counted like any other. Under a
-20 per second rule with 8 busy workers the overview showed 2,610 requests per second and 2,592
-503s per second for the target, while about 20 per second reached the backend. The fleet list's
-REQ/S is inflated the same way, VAST's own 503s cannot be told from Delta-V's, and every refusal
-is also an access log entry sent to the daemon.
-
-- **Seen.**
-- **Fix: medium.** Envoy marks a quota refusal with the response code details
-  `rate_limited_by_quota` (`filter.cc`). Count those apart, or filter them out of the access log
-  and rely on the quota reports.
-
-### 7. Open redirect after login
-
-`localPath` (`internal/webui/webui.go:414`) accepts a `next` value containing a tab. Browsers
-remove tabs from addresses, so `/login?next=/%09/evil.example/x` sends someone to
-`//evil.example/x` after they sign in with the real token.
-
-- **Reproduced** (the `Location` header).
-- **Fix: small.** Refuse any control character; parse the value and require a plain path.
-
-### 8. The quota service does too much work at fleet scale
-
-- A blocked rule's share is 0, and 0 also means "never sent", so every report for a blocked count
-  re-sends the refusal to every Envoy holding it: quadratic in the number of Envoys
-  (`server.go:318`). **Reproduced.**
-- Shares for a count are recomputed on every Envoy's report, not once per interval. **Read.**
-- `Status()` walks and sorts every count under the service's lock, and is called on every web UI
-  tick per viewer, every `/metrics` scrape and every rules read. **Read.**
-- **Fix: medium.**
-
-### 9. One unparsable VIP address blocks every config update
-
-VIP addresses from VAST go into endpoints unchecked (`poller.go`, `resolve`), and xDS rejects the
-whole snapshot if one is not an IP address (`internal/xds/resources.go:336`). No target is
-updated while the value is there, `target add` fails, and every rule change is rolled back.
-
-- **Read.**
-- **Fix: small.** Leave such a VIP out and say so in the target's status.
-
-### 10. Up to a quarter of a rule's rate is held back for idle Envoys
-
-`Divide` counts an Envoy that asks for nothing as asking for a quarter of an equal share. One
-busy host therefore gets about 78% of a rule's rate while nine others merely have the count open.
-`TestDivide` has this as an expected value (775 of 1,000).
-
-- **From the algorithm.**
-- **Fix: small to medium.** Cap what idle Envoys are held in total, or let it shrink with idle
-  time. Fixing item 2 keeps idle counts open longer, which makes this matter more.
-
-## Low
-
-### 11. A client can spend another access key's budget
-
-A request is counted before VAST authenticates it. Unsigned requests that carry someone else's
-access key ID use up that key's rate across the fleet. Even sharing bounds the harm: a host
-asking for everything gets an equal share, not all of it. Tollbooth has the same property.
-**By design.** Document it, or suggest `per: access_key, client` where it matters.
-
-### 12. Counts past the key cap, or for a removed rule, are never released
-
-Both are answered "allow all" and not tracked (`server.go`, `report`), so the Envoy keeps them
-and keeps reporting them. **Read. Fix: small:** answer with an abandon instead.
-
-### 13. Demand is measured with Envoy's whole-second timer
-
-Envoy reports the time since its last report in whole seconds, so a rate worked out from it can
-be 25% off. **Read in Envoy's source. Fix: small:** use the daemon's own clock between reports.
-
-### 14. A valid limit below 0.0005 per second is shown as "0 per second"
-
-`amount` prints three decimals (`internal/ratelimit/rule.go:239`). **Reproduced. Fix: small.**
-
-### 15. The fixture sanitizer's report can contain real addresses
-
-The report's path is built from an object's real key (`internal/lab/sanitize.go:291`), though the
-report is described as holding no values. It matters only for a response keyed by address or host
-name. **Read. Fix: small.**
-
-### 16. Two rule changes at the same moment can lose one
-
-A rule change that cannot be served puts back the list it read beforehand
-(`internal/server/api_rules.go`, `rulesChanged`), which undoes a change made in between.
-**Read. Fix: small:** hold one lock across the change and its rollback.
-
-## Not bugs, but unverified
-
-- TLS to the VIPs has never run against real Envoy (DESIGN.md amendment 6).
-- `make live` (real VAST, real bucket) has never run. It needs S3 keys and a bucket name.
-- The systemd units have not been run under systemd.
-- The web UI has been used by its owner; no one has checked it across browsers.
-- Rate rules have been tried with the AWS CLI only, and not for multipart transfers or listings.
-- The gRPC port is unauthenticated (a known gap). With rate rules, anyone who can reach it can
-  also shift shares by sending false usage reports.
-
-## Tidying the review also turned up
+### Tidying the review turned up
 
 - `internal/cli` has its own HTTP client and API types where `internal/apiclient` would do.
 - The rate, MB/s, latency and age formatters exist three times (`tui`, `webui`, `cli`).
-- `server/api_rules.go` checks `errors.Is(err, ratelimit.ErrInvalid)` on an error that
-  `Store.SetRule` has wrapped without it; the branch never runs, and the status is right anyway.
 
-## Decisions waiting on the owner
+### To confirm with the owner
 
-- The client unit's default of 2 Envoy worker threads is a guess (amendment 40).
-- The S3 operation table is adapted from tollbooth under Apache-2.0, with its LICENSE and NOTICE
-  shipped; the owner of both may prefer to relicense the table.
-- Whether `503 SlowDown` from VAST should count toward outlier ejection (amendments 3 and 17).
-- Envoy writes HTTP/1 header names in lower case unless told to preserve case; not yet looked
-  at on the wire against VAST.
-- `x-forwarded-proto: http` reaches VAST on every request; check that VAST ignores it.
+- **Outlier ejection on VAST's own `503 SlowDown`.** Today five 5xx in a row eject a VIP for a
+  while, which moves load onto the others when VAST is only asking clients to slow down. The
+  answer given on 2026-11-18 could be read either way, so nothing was changed.
 
-## Suggested order
+## What the review found, and what became of it
 
-Items 2, 3, 4, 7 and 9 are small and independent. Item 1 needs its design settled before any
-code. Items 5 and 10 are the same arithmetic and belong in one change.
+| # | Finding | Outcome | Established |
+|---|---|---|---|
+| 1 | A rule change did not reach connections already open: rules changed the listener, which Envoy applies to new connections only. | Fixed. Rules travel in the route (52 to 54). | Seen: one connection, rule added, changed and removed, each in effect on its next request (`TestRuleChangeReachesOpenConnections`). |
+| 2 | Slow rules could be beaten by pausing: a count was given up after 30 s of silence and came back with a full burst. | Fixed. A count is kept until its tokens would have refilled (58). | Seen: 12 an hour, burst 3; 4 passed, then none after 40 s of silence (`TestSlowRuleHoldsThroughAPause`). |
+| 3 | An encoded bucket name slipped past bucket filters and blocked rules; a request with no bucket was not counted by a per-bucket rule. | Fixed in the script (61). | Tested in the script. VAST's own reading of such paths: not tried. |
+| 4 | One empty answer from VAST plus two operator commands emptied a target. | Fixed. The hold counts polls (63). | Tested. |
+| 5 | Low-rate rules shared by many Envoys admitted several times their limit. | The rate is now exact: 400 Envoys on 20 an hour are given 20 an hour. The burst cannot be: each Envoy needs one. The rule says so (`holds`). | Tested. |
+| 6 | Refused requests were counted as the target's own requests and 503s. | Fixed. Counted apart, and each kept on record (57). | Seen: 4,322 requests and no 5xx for the target, 27,489 refused beside them. |
+| 7 | Open redirect after login through a tab in `next`. | Fixed (63). | Tested. |
+| 8 | The quota service did work that grew with the square of the fleet, and rebuilt its status on every read. | Fixed (60). | Tested: 500 Envoys on one count, shares worked out 36 times over five rounds of reports, where it was once for each of some 3,000 reports; a steady round sends nothing. |
+| 9 | One unparsable VIP address blocked every config update. | Fixed. That VIP is left out and counted (63). | Tested. |
+| 10 | A quarter of a rule's rate was held back for idle Envoys. | Now a tenth, however many are idle (59). | Tested. |
+| 11 | A client can spend another access key's budget with requests VAST will reject. | Accepted by the owner, and said where rules are described (62). | By design. |
+| 12 | Counts past the key bound, or of a removed rule, were never released by Envoy. | Fixed: answered with "forget it" (60). | Tested. |
+| 13 | Demand was measured with Envoy's whole-second timer. | Fixed: the daemon's clock (60). | Tested. |
+| 14 | A valid limit under 0.0005 a second was shown as 0. | Fixed (63). | Tested. |
+| 15 | The fixture sanitizer's report could contain a real address. | Fixed (63). | Tested. |
+| 16 | Two rule changes at once could lose one. | Fixed: one lock across a change and its undoing (60). | Read. |
+
+Found along the way, and not by the review:
+
+- **A listener rendered to different bytes from one moment to the next** whenever it held a
+  quota filter, so about half of all config rebuilds pushed a listener Envoy took for changed
+  and replaced (55). Fixed and tested.
+- **A new rule was unenforced for up to 5 s**: Envoy learned of it before the quota service
+  did. The order is now the other way round (60).
+
+Also checked again on real Envoy after the changes: the daemon stopped for 35 s of a 75 s run
+under a rule of 20 a second on two Envoys let 1,541 through, 20.5 a second, with no failed
+connection (56). The whole suite against Envoy is twelve tests, all passing.
