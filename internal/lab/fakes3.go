@@ -118,6 +118,9 @@ func (f *FakeS3) Serve(ctx context.Context, ln net.Listener) error {
 	return err
 }
 
+// started stands for every object's modification time.
+var started = time.Now().UTC().Truncate(time.Second)
+
 func (f *FakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	seq := f.requests.Add(1)
 	now := f.inFlight.Add(1)
@@ -216,6 +219,11 @@ func (f *FakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.Set("Content-Type", "application/octet-stream")
 		h.Set("Content-Length", strconv.FormatInt(size, 10))
+		// What every S3 answers with for an object, and what clients such
+		// as "aws s3 cp" will not do without.
+		h.Set("Last-Modified", started.Format(http.TimeFormat))
+		sum := sha256.Sum256([]byte(rawPath))
+		h.Set("ETag", `"`+hex.EncodeToString(sum[:16])+`"`)
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {
 			n, _ := io.Copy(w, PatternReader(rawPath, size))

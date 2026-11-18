@@ -362,6 +362,17 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     rule changes every listener's filter chain; changing one changes a filter's settings.
     Envoy's own memory of buckets is bounded only by the daemon abandoning idle ones.
 
+51. **The AWS CLI against a rule** (2.15.31, by hand on 2026-11-18, through real Envoy to the
+    fake backend). A refusal reaches it as `503`, `content-type: application/xml`, `retry-after:
+    1` and S3's error document, which it parses as `SlowDown`. In its default (standard) mode it
+    retries twice, after jittered delays of under a second each, ignores `Retry-After`, and
+    then fails with "reached max retries: 2". One `aws s3 cp --recursive` of 40 files against
+    5 PutObject a second: 11 failed by default; none with `AWS_RETRY_MODE=adaptive` (9 s) or
+    `AWS_MAX_ATTEMPTS=10` (13 s). It does not retry `429 TooManyRequests` at all: that code is
+    not in botocore's list of throttling errors and 429 is not among the statuses it treats as
+    transient. So `respond: 429` suits blocked rules and little else for AWS SDK clients. Not
+    tried: multipart transfers and listings (the fake backend has neither), other SDKs, boto3.
+
 ## Known gaps (POC)
 
 mTLS on the xDS and telemetry streams; daemon HA; per-group targeting of Envoys; long-term metric

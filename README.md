@@ -200,10 +200,23 @@ deltav rule operations           # the operation names a rule can use
   rule's whole rate by itself for ten minutes, and after that the rule is not enforced until the
   daemon is back. Blocked rules keep refusing throughout.
 
-Two things worth knowing before setting a low limit, both measured by tollbooth: the AWS CLI and
-boto3 in their default retry mode give up after a few refusals rather than slow down, so set
-`--burst` at least as high as the client's concurrency or use `AWS_RETRY_MODE=adaptive`; and a
-per-hour limit refuses for long stretches, longer than any SDK keeps retrying.
+How the AWS CLI takes a refusal, tried with version 2.15.31 against these rules:
+
+- It reads Envoy's answer as S3 throttling (`SlowDown`) and retries it, but in its default
+  mode only twice, each after less than a second, and it does not wait for `Retry-After`. Against a rule
+  of 5 uploads a second, one `aws s3 cp --recursive` of 40 small files (the CLI sends 10 at a
+  time) gave up on 11 of them and exited 1.
+- With `AWS_RETRY_MODE=adaptive`, or `AWS_MAX_ATTEMPTS=10`, the same copy uploaded all 40 and
+  exited 0, in 9 and 13 seconds: at 5 a second, 8 is the least it could take. Adaptive mode
+  slows itself to the rate it is given; more attempts simply try for longer.
+- A burst at least as large as the client's concurrency lets a short run through whole: ten
+  fetches at once against 2 a second all succeeded with `--burst 10`, three failed with
+  `--burst 2`.
+- It does **not** retry a `429`. A rule with `--respond 429` therefore fails a request on its
+  first refusal, whatever the retry settings. That suits a blocked rule, which fails at once
+  instead of after three tries; for a rate, leave the answer at 503.
+
+A per-hour limit refuses for long stretches, longer than any SDK keeps retrying.
 
 Rules work on path-style requests, which is what clients of a loopback address send anyway. The
 `source_ip` of tollbooth's rules has no counterpart here: Envoy sits on the client host, so the

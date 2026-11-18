@@ -178,9 +178,12 @@ func newRuleSetCmd() *cobra.Command {
 			"using a count, by what each asks for, and follows changes within about 5 seconds.\n" +
 			"With client in --per, every client host has the whole rate to itself instead.\n\n" +
 			"A request over the limit is answered 503 SlowDown, which is what S3 itself sends and\n" +
-			"what every SDK retries (--respond 429 for clients that want that instead). A request\n" +
-			"that matches several rules must be allowed by each. If the daemon is unreachable for\n" +
-			"more than ten minutes, rules stop being enforced until it is back.\n\n" +
+			"what S3 SDKs retry. The AWS CLI retries it only twice by default: for a low limit set\n" +
+			"AWS_RETRY_MODE=adaptive on the client, or give the rule a --burst as large as the\n" +
+			"client's concurrency. --respond 429 answers 429 instead, which the AWS CLI does not\n" +
+			"retry at all. A request that matches several rules must be allowed by each. If the\n" +
+			"daemon is unreachable for more than ten minutes, rules stop being enforced until it\n" +
+			"is back.\n\n" +
 			"Examples:\n\n" +
 			"  deltav rule set uploads --operation PutObject,UploadPart --per-second 2000 --per access_key\n" +
 			"  deltav rule set listings --operation 'List*' --per-minute 600 --per total\n" +
