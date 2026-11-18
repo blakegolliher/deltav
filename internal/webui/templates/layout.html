@@ -1,0 +1,113 @@
+{{define "head"}}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="htmx-config" content="includeIndicatorCSS:false">
+<link rel="stylesheet" href="/static/app.css?v={{.Assets}}">
+<script src="/static/app.js?v={{.Assets}}"></script>
+{{end}}
+
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<title>{{.Title}} · Delta-V</title>
+{{template "head" .}}
+<script src="/static/htmx.min.js?v={{.Assets}}" defer></script>
+<script src="/static/hx-sse.min.js?v={{.Assets}}" defer></script>
+</head>
+<body>
+<div id="page">
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="topbar-in">
+      <a class="brand" href="/">Delta-V</a>
+      <nav class="nav" aria-label="Views">
+        {{range .Nav}}<a href="{{.URL}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}
+      </nav>
+      <div class="topbar-end">
+        <span id="live-state" class="live-state" data-state="off" role="status"><span class="live-dot" aria-hidden="true"></span><span id="live-text">Not updating</span></span>
+        <button type="button" id="theme" class="btn btn-quiet" aria-label="Switch between light and dark colors">Light / dark</button>
+        {{if .SignOut}}<form method="post" action="/logout"><button class="btn btn-quiet">Sign out</button></form>{{end}}
+      </div>
+    </div>
+  </header>
+  <main id="main" class="main">
+    {{with .Flash}}
+    <div class="note {{if .OK}}note-ok{{else}}note-bad{{end}}" role="{{if .OK}}status{{else}}alert{{end}}">
+      {{if .OK}}{{badge "good" "Done"}}{{else}}{{badge "crit" "Not done"}}{{end}}
+      <p>{{.Text}}</p>
+    </div>
+    {{end}}
+    {{if .Overview}}{{template "overview" .}}{{end}}
+    {{if .CNodes}}{{template "cnodes" .}}{{end}}
+    {{if .Fleet}}{{template "fleet" .}}{{end}}
+    {{if .Controls}}{{template "controls" .}}{{end}}
+  </main>
+</div>
+</body>
+</html>
+{{end}}
+
+{{define "windows"}}
+<div class="seg" role="group" aria-label="Window that rates and latency are taken over">
+  {{range .Windows}}<a id="window-{{.Label}}" href="{{.URL}}" {{partial .URL}}{{if .Active}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}
+</div>
+{{end}}
+
+{{define "apierror"}}
+{{if .Err}}
+<div class="note note-bad" role="alert">
+  {{badge "crit" "Stale"}}
+  <p>The daemon's API could not be read, so this page may be out of date: {{.Err}}</p>
+</div>
+{{end}}
+{{end}}
+
+{{define "stat-heads"}}
+<th scope="col" class="num" title="Requests Envoys have sent and not yet had answered">In flight</th>
+<th scope="col" class="num">Req/s</th>
+<th scope="col" class="num" title="Request bodies, client to VAST, in megabytes per second">MB/s in</th>
+<th scope="col" class="num" title="Response bodies, VAST to client, in megabytes per second">MB/s out</th>
+<th scope="col" class="num" title="Median time from request to last byte of the response">p50</th>
+<th scope="col" class="num" title="99 requests in 100 finished within this time">p99</th>
+<th scope="col" class="num" title="403 Forbidden responses per second">403/s</th>
+<th scope="col" class="num" title="503 Service Unavailable responses per second">503/s</th>
+{{end}}
+
+{{define "stat-cells"}}
+<td class="num">{{count .InFlight}}</td>
+<td class="num">{{rate .Stats.RequestRate}}</td>
+<td class="num">{{mbps .Stats.BytesInRate}}</td>
+<td class="num">{{mbps .Stats.BytesOutRate}}</td>
+<td class="num">{{ms .Stats.LatencyMS.P50}}</td>
+<td class="num">{{ms .Stats.LatencyMS.P99}}</td>
+<td class="num{{if .Stats.Status.S403}} flagged{{end}}">{{rate .Stats.Rate403}}</td>
+<td class="num{{if .Stats.Status.S503}} flagged{{end}}">{{rate .Stats.Rate503}}</td>
+{{end}}
+
+{{define "login"}}<!doctype html>
+<html lang="en">
+<head>
+<title>Sign in · Delta-V</title>
+{{template "head" .}}
+</head>
+<body>
+<main class="login">
+  <form method="post" action="/login" class="card login-card">
+    <h1 class="brand">Delta-V</h1>
+    <p class="hint">This daemon asks for its API token: the value of <code>DELTAV_API_TOKEN</code> it was started with.</p>
+    {{if .Failed}}
+    <div class="note note-bad" role="alert">{{badge "crit" "Refused"}}<p>That is not this daemon's token.</p></div>
+    {{end}}
+    <input type="hidden" name="next" value="{{.Next}}">
+    <label class="field">
+      <span>API token</span>
+      <input class="input" type="password" name="token" autocomplete="current-password" required autofocus>
+    </label>
+    <button class="btn btn-main">Sign in</button>
+    <p class="hint">Signing in keeps a cookie for 12 hours that only this site receives. The token itself is not stored in the browser.</p>
+  </form>
+</main>
+</body>
+</html>
+{{end}}

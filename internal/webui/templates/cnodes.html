@@ -1,0 +1,107 @@
+{{define "cnodes"}}
+<div class="toolbar">
+  <h1>CNodes</h1>
+  <div class="toolbar-end"><span class="hint">Rates and latency over the last</span>{{template "windows" .}}</div>
+</div>
+<div id="live" hx-sse:connect="{{.LiveURL}}" hx-swap="innerMorph">{{template "cnodes-live" .}}</div>
+{{end}}
+
+{{define "cnodes-live"}}
+{{template "apierror" .}}
+{{with .CNodes}}
+<section class="card" aria-labelledby="cnodes-title">
+  <div class="card-head">
+    <h2 id="cnodes-title">CNodes of the attached clusters</h2>
+    <span class="hint">State is VAST's. Traffic is what Envoys sent to each CNode's VIPs. Open a row for its VIPs.</span>
+  </div>
+  {{if .Rows}}
+  <div class="scroll">
+  <table class="table">
+    <thead>
+      <tr>
+        <th scope="col">CNode</th>
+        {{if .ManyClusters}}<th scope="col">Cluster</th>{{end}}
+        <th scope="col">State</th>
+        <th scope="col" class="num" title="VIPs this CNode hosts in the pools of configured targets">VIPs</th>
+        {{template "stat-heads"}}
+        <th scope="col" title="Requests per second in ten-second steps, each line scaled to its own peak">Last 5 minutes</th>
+      </tr>
+    </thead>
+    {{$v := .}}
+    {{range .Rows}}
+    <tbody id="{{.ID}}">
+      <tr{{if .Open}} class="opened"{{end}}>
+        <th scope="row">
+          <a class="toggle" id="{{.ID}}-toggle" href="{{.Toggle}}" {{partial .Toggle}} aria-expanded="{{.Open}}" aria-controls="{{.ID}}-vips">
+            <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+            <span class="name">{{.Name}}</span>
+          </a>
+          {{if or .IsLeader .IsMgmt}}<span class="sub">{{if .IsLeader}}leader{{end}}{{if and .IsLeader .IsMgmt}}, {{end}}{{if .IsMgmt}}management{{end}}</span>{{end}}
+        </th>
+        {{if $v.ManyClusters}}<td>{{.Cluster}}</td>{{end}}
+        <td>
+          {{cnodeState .CNode}}
+          {{if and (not .Healthy) .State}}<span class="sub">VAST reports {{.State}}{{if not .Enabled}}, disabled{{end}}; its VIPs are not served</span>{{end}}
+        </td>
+        <td class="num">{{count .VIPs}}</td>
+        <td class="num">
+          {{count .InFlight}}
+          {{range .Limits}}
+          <span class="limit" title="Requests in flight to this CNode for target {{.Target}}, against its limit">
+            {{meter .InFlight .PerCNode}}
+            <span class="sub">{{count .InFlight}} of {{count .PerCNode}}, {{.Target}}{{if .Over}} {{badge "crit" "Over"}}{{end}}</span>
+          </span>
+          {{end}}
+        </td>
+        <td class="num">{{rate .Stats.RequestRate}}</td>
+        <td class="num">{{mbps .Stats.BytesInRate}}</td>
+        <td class="num">{{mbps .Stats.BytesOutRate}}</td>
+        <td class="num">{{ms .Stats.LatencyMS.P50}}</td>
+        <td class="num">{{ms .Stats.LatencyMS.P99}}</td>
+        <td class="num{{if .Stats.Status.S403}} flagged{{end}}">{{rate .Stats.Rate403}}</td>
+        <td class="num{{if .Stats.Status.S503}} flagged{{end}}">{{rate .Stats.Rate503}}</td>
+        <td>{{spark .RateHistory .Name}}</td>
+      </tr>
+      {{if .Open}}
+      <tr class="detail" id="{{.ID}}-vips">
+        <td colspan="{{$v.Columns}}">
+          {{if .Endpoints}}
+          <table class="table table-inner">
+            <caption>VIPs on {{.Name}}</caption>
+            <thead>
+              <tr>
+                <th scope="col">VIP</th>
+                <th scope="col">Target</th>
+                {{template "stat-heads"}}
+                <th scope="col" class="num" title="Requests Envoys report having sent here since the daemon started">Requests sent</th>
+                <th scope="col" class="num" title="Of those, the ones that failed">Failed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .Endpoints}}
+              <tr>
+                <th scope="row"><code>{{.Endpoint}}</code></th>
+                <td>{{.Target}}</td>
+                {{template "stat-cells" .}}
+                <td class="num">{{count .Load.Issued}}</td>
+                <td class="num{{if .Load.Errors}} flagged{{end}}">{{count .Load.Errors}}</td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+          {{else}}
+          <p class="empty">No VIP of a configured target is on this CNode{{if .Drained}}: it is drained{{else if not .Healthy}}: it is not healthy{{end}}.</p>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+    {{end}}
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">No CNodes to show. Attach a VAST cluster under <a href="/controls">Controls</a>; static targets have no CNodes.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

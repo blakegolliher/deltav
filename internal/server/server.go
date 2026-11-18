@@ -1,6 +1,6 @@
 // Package server wires the deltav daemon: one gRPC listener for everything
-// Envoy opens (ADS now; access log and load reporting from milestone 3) and
-// one HTTP listener for the API, web UI and /metrics.
+// Envoy opens (ADS, access logs and load reports) and one HTTP listener for
+// the API, the web UI and /metrics.
 package server
 
 import (
@@ -27,6 +27,7 @@ import (
 	"deltav/internal/state"
 	"deltav/internal/telemetry"
 	"deltav/internal/version"
+	"deltav/internal/webui"
 	"deltav/internal/xds"
 )
 
@@ -72,6 +73,10 @@ type Config struct {
 	// package limit. A push makes every Envoy reconnect that target's pools.
 	LimitMinChange   float64
 	LimitMinInterval time.Duration
+
+	// UIInterval is how often an open web UI page is brought up to date;
+	// zero means webui.DefaultInterval.
+	UIInterval time.Duration
 }
 
 // Server is a configured, not yet listening, daemon.
@@ -164,15 +169,32 @@ func New(cfg Config) (*Server, error) {
 	}
 	log.Info("serving targets", "static", len(cfg.StaticTargets), "vast", len(store.Targets()), "config_version", s.xds.Version())
 
-	var handler http.Handler = s.routes()
+	// The HTTP listener: the API, /metrics, and the web UI, which is itself
+	// a client of the API (it is handed the API's handler and nothing else).
+	// The guard in front checks the token and where a request comes from.
+	api := s.apiRoutes()
+	g := newGuard(cfg.APIToken)
+	opts := webui.Options{API: api, Done: ctx.Done(), Logger: log, Interval: cfg.UIInterval}
 	if cfg.APIToken != "" {
-		handler = requireToken(cfg.APIToken, map[string]bool{"/healthz": true}, handler)
+		opts.Session = g
 	}
-	s.http = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	ui, err := webui.New(opts)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	root := http.NewServeMux()
+	root.Handle("/api/", api)
+	root.Handle("/healthz", api)
+	root.Handle("/metrics", api)
+	root.Handle("/", ui.Handler())
+	g.next = root
+	s.http = &http.Server{Handler: g, ReadHeaderTimeout: 10 * time.Second}
 	return s, nil
 }
 
-func (s *Server) routes() *http.ServeMux {
+// apiRoutes is the HTTP API, with /healthz and /metrics.
+func (s *Server) apiRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -186,6 +208,7 @@ func (s *Server) routes() *http.ServeMux {
 			"go_version":   runtime.Version(),
 		})
 	})
+	mux.HandleFunc("GET /api/v1/settings", s.handleSettings)
 	mux.HandleFunc("GET /api/v1/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/v1/targets", s.handleTargets)
 	mux.HandleFunc("POST /api/v1/targets", s.handleTargetAdd)
@@ -284,7 +307,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.Listen(); err != nil {
 		return err
 	}
-	s.log.Info("deltav serving", "version", version.Version, "grpc", s.GRPCAddr(), "http", s.HTTPAddr())
+	s.log.Info("deltav serving", "version", version.Version, "grpc", s.GRPCAddr(), "http", s.HTTPAddr(), "web_ui", "http://"+s.HTTPAddr()+"/")
 
 	errc := make(chan error, 2)
 	var wg sync.WaitGroup

@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"deltav/internal/apiclient"
 	"deltav/internal/server"
 	"deltav/internal/vast/vasttest"
 )
@@ -136,8 +137,8 @@ func sample() *Model {
 	last := now.Add(-5 * time.Second)
 	m.clusters = []Cluster{{Name: "lab", Host: "vast.example.com", User: "admin", CNodes: 3, Pools: 48, VIPs: 187, LastPoll: &last}}
 	m.targets = []TargetInfo{
-		{Name: "main", ListenPort: 9000, Source: "vast", Cluster: "lab", Pool: "main", Endpoints: make([]struct{}, 4), Status: &TargetStatus{VIPs: 6, Healthy: 4}},
-		{Name: "fixed", ListenPort: 9002, Source: "static", Endpoints: make([]struct{}, 3)},
+		{Name: "main", ListenPort: 9000, Source: "vast", Cluster: "lab", Pool: "main", Endpoints: make([]apiclient.Endpoint, 4), Status: &TargetStatus{VIPs: 6, Healthy: 4}},
+		{Name: "fixed", ListenPort: 9002, Source: "static", Endpoints: make([]apiclient.Endpoint, 3)},
 	}
 	m.loaded = true
 

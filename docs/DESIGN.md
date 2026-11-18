@@ -225,6 +225,48 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     runs. Milestone 8 writes the client unit, which is where `--concurrency` is set; the choice
     there (few workers and a tight cap, or many and a loose one) is the user's.
 
+### Milestone 5: web UI
+
+35. **The web UI is an API client that happens to live in the daemon.** `internal/webui` is handed
+    the API's `http.Handler` and nothing else, and calls it in process through the typed client
+    the TUI uses over the network (`internal/apiclient`). A page cannot show or change anything
+    the API does not offer. What the UI needed and the API lacked went into the API:
+    `GET /api/v1/settings` (the enforce-mode debounce, so the page can state it).
+36. **Pages are rendered on the server and kept current by a stream of markup.** Each page has one
+    live region. `GET /live/<page>`, with the page's own parameters, renders that region again
+    every 2 s and sends it as a server-sent event; htmx 4's SSE extension merges it into the page
+    (a morph, which leaves focus, scroll position and half-typed form fields alone; forms are
+    excluded from the merge altogether). Markup that has not changed is not sent. Window, sort,
+    filter, page and opened rows are URL parameters: every view is a link, works without script,
+    and the daemon decides what a page of the fleet is. The stream is the UI's own and not
+    `/api/v1/events`, because htmx swaps markup and what is rendered depends on the page's
+    parameters. Forms post to `/controls/...`, which make one API call each and answer with the
+    page.
+37. **A browser changes the threat model, so the HTTP listener has a guard** (`internal/server/
+    auth.go`). (a) The login form of amendment 9 trades the token for a cookie that holds an
+    expiry time and an HMAC of it keyed with the token: `HttpOnly`, `SameSite=Strict`, 12 hours,
+    no session state in the daemon, void when the token changes. (b) A request that changes
+    anything is refused if the browser says it comes from another origin (`Origin`,
+    `Sec-Fetch-Site`). This also closes a hole older than the UI: with no token, any page open
+    in a browser on the daemon's host could post to the loopback API, and a drain needs no body.
+    (c) With no token the `Host` header must name loopback, which stops DNS rebinding. (d) The
+    pages forbid inline script and style and anything from another origin (CSP). Names that
+    reach a page from a VAST cluster or an Envoy are escaped by `html/template`. (e) The event
+    stream format ends a line at a bare CR as well as at LF; line ends in the markup are
+    normalised before framing, so a CR in such a name cannot forge an event. The gRPC port is
+    unauthenticated (see Known gaps), so those names must be assumed hostile.
+38. **Charts.** One data color; states are an icon and a word, never a color alone; a sparkline
+    is the request rate in the last 29 ten-second slots, scaled to its own peak, with the range
+    in its accessible label and the current figures in the cells beside it; a meter shows
+    requests in flight against a limit and changes color at 80% and above 100%; numbers in
+    columns are tabular. Light and dark values are chosen per role with `light-dark()`.
+39. **Not yet seen in a browser.** The session that built the UI could not run one. Its tests
+    cover the markup (well formed, IDs unique, every class has a style rule), the forms, the live
+    stream, the login and the guards, and the whole stack was driven with real Envoy under load
+    through `curl`. htmx's part (merging events, partial page swaps, confirmation prompts, the
+    redirect to the login form when a session ends) was checked by reading the pinned htmx 4.0.1
+    source, not by running it. Nobody has looked at the rendering.
+
 ## Known gaps (POC)
 
 mTLS on the xDS and telemetry streams; daemon HA; per-group targeting of Envoys; long-term metric

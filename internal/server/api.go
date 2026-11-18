@@ -25,6 +25,7 @@ import (
 //	GET /api/v1/fleet       Envoys: paged, sorted, filtered
 //	GET /api/v1/fleet/{id}  one Envoy, every window
 //	GET /api/v1/events      server-sent events: the overview, repeated
+//	GET /api/v1/settings    the daemon settings a UI needs to explain itself
 //
 // Stats take ?window=1m|5m|1h (default 1m).
 
@@ -39,6 +40,28 @@ func window(w http.ResponseWriter, r *http.Request) (metrics.Window, bool) {
 		return 0, false
 	}
 	return win, true
+}
+
+// settingsResponse is GET /api/v1/settings: how the daemon was started, as
+// far as a UI needs it to say what a control will do.
+type settingsResponse struct {
+	// A recomputed enforce-mode share is pushed only when it differs from
+	// the one in force by more than LimitMinChange (a fraction of it) and
+	// at least LimitMinIntervalSeconds after the last push.
+	LimitMinChange          float64 `json:"limit_min_change"`
+	LimitMinIntervalSeconds float64 `json:"limit_min_interval_seconds"`
+	VASTPollIntervalSeconds float64 `json:"vast_poll_interval_seconds"`
+	// TokenRequired is true when the API asks for a bearer token.
+	TokenRequired bool `json:"token_required"`
+}
+
+func (s *Server) handleSettings(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, settingsResponse{
+		LimitMinChange:          s.poller.minChange,
+		LimitMinIntervalSeconds: s.poller.minInterval.Seconds(),
+		VASTPollIntervalSeconds: s.poller.interval.Seconds(),
+		TokenRequired:           s.cfg.APIToken != "",
+	})
 }
 
 type endpointJSON struct {

@@ -1,5 +1,6 @@
-// Command dvlab is the Delta-V test harness: a fake S3 backend and a load
-// generator. It is a development tool and is not part of the deltav binary.
+// Command dvlab is the Delta-V test harness: a fake S3 backend, a mock VAST
+// API and a load generator. It is a development tool and is not part of the
+// deltav binary.
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 
 	"deltav/internal/lab"
 	"deltav/internal/vast"
+	"deltav/internal/vast/vasttest"
 )
 
 func main() {
@@ -29,12 +31,12 @@ func main() {
 	defer stop()
 	root := &cobra.Command{
 		Use:           "dvlab",
-		Short:         "Delta-V test harness: fake S3 backends and a load generator",
+		Short:         "Delta-V test harness: fake S3 backends, a mock VAST API and a load generator",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 	root.CompletionOptions.HiddenDefaultCmd = true
-	root.AddCommand(fakeS3Cmd(), loadgenCmd(), vastProbeCmd())
+	root.AddCommand(fakeS3Cmd(), mockVASTCmd(), loadgenCmd(), vastProbeCmd())
 	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "dvlab: %v\n", err)
 		os.Exit(1)
@@ -57,6 +59,47 @@ func credentials(access, secret, region string) (*lab.Credentials, error) {
 		return nil, errors.New("an access key and a secret key must be given together")
 	}
 	return &lab.Credentials{AccessKey: access, SecretKey: secret, Region: region}, nil
+}
+
+// mockVASTCmd runs the mock VAST API the tests use, so that the whole of
+// Delta-V (clusters, pools, CNodes, limits, drain) can be tried with no VAST
+// cluster: point one of its pools at fake S3 backends with --pool-vips.
+func mockVASTCmd() *cobra.Command {
+	var (
+		fixtures string
+		poolVIPs []string
+	)
+	cmd := &cobra.Command{
+		Use:   "mockvast",
+		Short: "Run a mock VAST API from recorded responses, for use with \"deltav vast add --insecure\"",
+		Example: "  dvlab fakes3 --listen 127.0.0.11:9100,127.0.0.12:9100,127.0.0.13:9100,127.0.0.14:9100,127.0.0.15:9100,127.0.0.16:9100 &\n" +
+			"  dvlab mockvast --pool-vips main=127.0.0.11,127.0.0.12,127.0.0.13,127.0.0.14,127.0.0.15,127.0.0.16",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			m, err := vasttest.New(fixtures)
+			if err != nil {
+				return fmt.Errorf("--fixtures %s: %w", fixtures, err)
+			}
+			defer m.Close()
+			for _, pv := range poolVIPs {
+				pool, ips, ok := strings.Cut(pv, "=")
+				if !ok {
+					return fmt.Errorf("--pool-vips %q: want POOL=IP[,IP...]", pv)
+				}
+				if err := m.SetPoolVIPs(pool, strings.Split(ips, ",")); err != nil {
+					return fmt.Errorf("--pool-vips: %w", err)
+				}
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "mock VAST API at https://%s (self-signed certificate)\n", m.Host())
+			fmt.Fprintf(out, "attach it with:\n  DELTAV_PASSWORD=%s deltav vast add mock --host %s --user %s --insecure\n", vasttest.Password, m.Host(), vasttest.User)
+			<-cmd.Context().Done()
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&fixtures, "fixtures", filepath.Join("testdata", "vast", "v5.5.3"), "directory holding cnodes.json, vippools.json and vips.json")
+	cmd.Flags().StringArrayVar(&poolVIPs, "pool-vips", nil, "POOL=IP[,IP...]: give a pool's VIPs these addresses, e.g. those of fake S3 backends (repeatable; the count must match the pool's)")
+	return cmd
 }
 
 func fakeS3Cmd() *cobra.Command {

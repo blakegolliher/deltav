@@ -1,0 +1,279 @@
+{{define "controls"}}
+<div class="toolbar">
+  <h1>Controls</h1>
+  <div class="toolbar-end"><span class="hint">Changes take effect on every Envoy within a second or two.</span></div>
+</div>
+<div id="live" hx-sse:connect="{{.LiveURL}}" hx-swap="innerMorph">{{template "controls-live" .}}</div>
+{{end}}
+
+{{define "controls-live"}}
+{{template "apierror" .}}
+{{$now := .Now}}
+{{with .Controls}}
+{{$c := .}}
+
+<section class="card" aria-labelledby="limits-title">
+  <div class="card-head">
+    <h2 id="limits-title">Connection limit per CNode</h2>
+    <span class="hint">How many connections the whole fleet may hold to any one CNode, for each target.</span>
+  </div>
+  <div class="split">
+    <div class="split-main">
+      {{$any := false}}
+      {{range .Targets}}{{if eq .Source "vast"}}{{$any = true}}{{$t := .}}
+      <div class="control" id="limit-{{.Name}}">
+        <div class="control-what">
+          <h3 class="name">{{.Name}}</h3>
+          <p class="sub">pool {{.Pool}} on {{.Cluster}}</p>
+          {{with .Status}}{{with .Limit}}
+          <p class="control-state">
+            {{count .PerCNode}} per CNode,
+            {{if eq .Mode "enforce"}}enforced{{else}}alert only{{end}}
+          </p>
+          {{if eq .Mode "enforce"}}
+          <p class="sub">
+            Each Envoy may hold {{count .Share}} to each VIP: {{count .PerCNode}} ÷ {{count .Envoys}} {{if eq .Envoys 1}}Envoy{{else}}Envoys{{end}} ÷ {{count .MaxVIPsPerCNode}} {{if eq .MaxVIPsPerCNode 1}}VIP{{else}}VIPs{{end}} on one CNode.
+            {{if ne .Share .Computed}}A new cap of {{count .Computed}} is held back for now (point 2).{{end}}
+          </p>
+          {{if overcommitted .}}<p class="sub">{{badge "warn" "Cannot hold"}} {{count .Envoys}} Envoys × {{count .MaxVIPsPerCNode}} VIPs is more than the limit, and no Envoy can be given less than 1 (point 1).</p>{{end}}
+          {{end}}
+          {{else}}
+          <p class="control-state quiet">No limit</p>
+          {{end}}{{else}}
+          <p class="control-state quiet">Waiting for the first read of {{.Cluster}}</p>
+          {{end}}
+          {{range .Over}}<p class="sub">{{badge "crit" "Over"}} {{.CNode}} has {{count .InFlight}} in flight</p>{{end}}
+        </div>
+        <div class="control-how">
+          {{/* Live updates leave this form alone (hx-morph-skip), so nothing typed into it is
+               lost; the limit in force is the text beside it, which does update. */}}
+          <form method="post" action="/controls/limit" {{submit "/controls/limit"}} class="form-row" hx-morph-skip>
+            <input type="hidden" name="target" value="{{.Name}}">
+            <label class="field">
+              <span>Connections per CNode</span>
+              <input class="input input-num" type="number" name="per_cnode" min="1" max="4294967295" step="1" required inputmode="numeric" value="{{with .Status}}{{with .Limit}}{{.PerCNode}}{{end}}{{end}}">
+            </label>
+            <label class="field">
+              <span>Mode</span>
+              <select class="input" name="mode">
+                <option value="alert">Alert only</option>
+                <option value="enforce"{{with .Status}}{{with .Limit}}{{if eq .Mode "enforce"}} selected{{end}}{{end}}{{end}}>Enforce</option>
+              </select>
+            </label>
+            <button class="btn btn-main">Set limit</button>
+          </form>
+          {{with .Status}}{{if .Limit}}
+          <form method="post" action="/controls/limit/clear" {{submit "/controls/limit/clear"}} hx-confirm="Remove the limit from {{$t.Name}}?">
+            <input type="hidden" name="target" value="{{$t.Name}}">
+            <button class="btn">Remove limit</button>
+          </form>
+          {{end}}{{end}}
+        </div>
+      </div>
+      {{end}}{{end}}
+      {{if not $any}}<p class="empty">Limits apply to targets backed by a VAST pool, and there are none yet. Add one below.</p>{{end}}
+    </div>
+    <aside class="split-aside explain" aria-label="What the two modes do">
+      <p><strong>Connections</strong> are requests in flight: S3 over HTTP/1.1 holds one request per connection. Idle keep-alive connections are not counted.</p>
+      <p><strong>Alert only</strong> reports CNodes over the limit on these pages, in the API and in <code>/metrics</code>. Nothing is enforced.</p>
+      <p><strong>Enforce</strong> also gives every Envoy a cap. At its cap an Envoy makes requests to that VIP wait; it does not fail them or send them elsewhere. How Envoy applies a cap has three consequences:</p>
+      <ol>
+        <li><strong>The cap is each Envoy's own.</strong> An Envoy cannot see what other hosts hold, so the limit is divided: limit ÷ connected Envoys ÷ the most VIPs of the target on one CNode, rounded down but never below 1. A CNode with fewer VIPs gets less than the limit. Once Envoys × VIPs is more than the limit, the fleet can exceed it; that is still reported.</li>
+        <li><strong>A new cap makes every Envoy reconnect.</strong> The cap is part of the target's cluster config in Envoy, and changing it makes Envoy close and reopen its connections for that target as requests finish. So as Envoys come and go, a recomputed cap is sent only when it differs from the one in force by more than {{percent .Settings.LimitMinChange}}, and no sooner than {{seconds .Settings.LimitMinIntervalSeconds}} after the last. A limit you set here is sent at once.</li>
+        <li><strong>The cap is exact only for an Envoy with one worker thread.</strong> Each further worker can hold one more connection to a VIP than the cap. Envoy starts a worker per core unless it is given <code>--concurrency</code>.</li>
+      </ol>
+    </aside>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="drain-title">
+  <div class="card-head">
+    <h2 id="drain-title">Drain a CNode</h2>
+    <span class="hint">A drained CNode's VIPs are withheld from every Envoy at once; requests in flight finish. Nothing is changed on the VAST cluster. A drain lasts until you undo it, daemon restarts included.</span>
+  </div>
+  {{if .CNodes}}
+  <div class="scroll">
+  <table class="table">
+    <thead>
+      <tr>
+        <th scope="col">CNode</th>
+        <th scope="col">Cluster</th>
+        <th scope="col">State</th>
+        <th scope="col" class="num" title="VIPs this CNode hosts in the pools of configured targets">VIPs</th>
+        <th scope="col" class="num">In flight</th>
+        <th scope="col"><span class="sr">Action</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .CNodes}}
+      <tr>
+        <th scope="row"><span class="name">{{.Name}}</span></th>
+        <td>{{.Cluster}}</td>
+        <td>{{cnodeState .}}</td>
+        <td class="num">{{count .VIPs}}</td>
+        <td class="num">{{count .InFlight}}</td>
+        <td class="act">
+          <form method="post" action="/controls/drain" {{submit "/controls/drain"}}{{if not .Drained}} hx-confirm="Drain {{.Name}}? Its VIPs leave every Envoy at once."{{end}}>
+            <input type="hidden" name="cluster" value="{{.Cluster}}">
+            <input type="hidden" name="cnode" value="{{.Name}}">
+            <input type="hidden" name="drained" value="{{not .Drained}}">
+            <button class="btn">{{if .Drained}}Undrain{{else}}Drain{{end}}</button>
+          </form>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">No CNodes: no VAST cluster is attached, or none has been read yet.</p>
+  {{end}}
+</section>
+
+<section class="card" aria-labelledby="targets-title">
+  <div class="card-head">
+    <h2 id="targets-title">Targets</h2>
+    <span class="hint">A target is one VIP pool, balanced behind one loopback port on every client host.</span>
+  </div>
+  {{if .Targets}}
+  <div class="scroll">
+  <table class="table">
+    <thead>
+      <tr>
+        <th scope="col">Target</th>
+        <th scope="col">Clients connect to</th>
+        <th scope="col">Balanced across</th>
+        <th scope="col" class="num">Endpoints</th>
+        <th scope="col">To VAST</th>
+        <th scope="col"><span class="sr">Action</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Targets}}
+      <tr>
+        <th scope="row"><span class="name">{{.Name}}</span></th>
+        <td><code>http://127.0.0.1:{{.ListenPort}}</code></td>
+        <td>
+          {{if eq .Source "vast"}}pool {{.Pool}}{{if .Tenant}} (tenant {{.Tenant}}){{end}} on {{.Cluster}}, port {{.Port}}
+            {{with .Status}}
+              {{if .Problem}}<span class="sub">{{badge "crit" "Not resolved"}} {{.Problem}}</span>
+              {{else if .Held}}<span class="sub">{{badge "warn" "Held"}} serving the last known list</span>{{end}}
+            {{end}}
+          {{else}}a fixed list given to <code>serve --static-target</code>{{end}}
+        </td>
+        <td class="num">{{count (len .Endpoints)}}</td>
+        <td>{{if .TLS}}TLS{{else}}Plain HTTP{{end}}</td>
+        <td class="act">
+          {{if eq .Source "vast"}}
+          <form method="post" action="/controls/targets/remove" {{submit "/controls/targets/remove"}} hx-confirm="Remove target {{.Name}}? Every Envoy closes its listener on port {{.ListenPort}}.">
+            <input type="hidden" name="name" value="{{.Name}}">
+            <button class="btn">Remove</button>
+          </form>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">No targets yet.</p>
+  {{end}}
+  {{if .Clusters}}
+  <details class="more" hx-morph-skip{{if eq .OpenForm "target"}} open{{end}}>
+    <summary>Add a target</summary>
+    <form method="post" action="/controls/targets" {{submit "/controls/targets"}} class="form-grid">
+      <label class="field"><span>Name</span><input class="input" name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]*" value="{{.NewTarget.Name}}" autocomplete="off" spellcheck="false"><small>Letters, digits, dot, dash, underscore.</small></label>
+      <label class="field"><span>VAST cluster</span>
+        <select class="input" name="cluster" required>
+          {{range .Clusters}}<option value="{{.Name}}"{{if eq .Name $c.NewTarget.Cluster}} selected{{end}}>{{.Name}}</option>{{end}}
+        </select>
+      </label>
+      <label class="field"><span>VIP pool</span><input class="input" name="pool" required list="pools" value="{{.NewTarget.Pool}}" autocomplete="off" spellcheck="false"><small>The pool whose VIPs serve S3.</small></label>
+      <datalist id="pools">
+        {{range .Clusters}}{{$cl := .Name}}{{range .Pools}}<option value="{{.Name}}">{{.Name}}: {{.VIPs}} VIPs, {{$cl}}{{if .Tenant}}, tenant {{.Tenant}}{{end}}</option>{{end}}{{end}}
+      </datalist>
+      <label class="field"><span>Tenant <em>(optional)</em></span><input class="input" name="tenant" value="{{.NewTarget.Tenant}}" autocomplete="off" spellcheck="false"><small>Only if two tenants have a pool of that name.</small></label>
+      <label class="field"><span>S3 port on the VIPs</span><input class="input input-num" type="number" name="port" min="1" max="65535" required value="{{if .NewTarget.Port}}{{.NewTarget.Port}}{{else}}80{{end}}"></label>
+      <label class="field"><span>Loopback port on the clients</span><input class="input input-num" type="number" name="listen_port" min="1" max="65535" required value="{{if .NewTarget.ListenPort}}{{.NewTarget.ListenPort}}{{else}}9000{{end}}"><small>Envoy listens here on every client host.</small></label>
+      <fieldset class="field-set">
+        <legend>TLS to the VIPs</legend>
+        <label class="check"><input type="checkbox" name="tls" value="true"{{if .NewTarget.TLS}} checked{{end}}><span>Connect to the VIPs over TLS</span></label>
+        <label class="field"><span>Server name</span><input class="input" name="server_name" value="{{with .NewTarget.TLS}}{{.ServerName}}{{end}}" autocomplete="off" spellcheck="false"><small>Sent as SNI and checked against the certificate. Needed with TLS.</small></label>
+        <label class="field"><span>CA bundle path on the clients <em>(optional)</em></span><input class="input" name="ca_file" value="{{with .NewTarget.TLS}}{{.CAFile}}{{end}}" autocomplete="off" spellcheck="false"><small>Default: each client host's own trust store.</small></label>
+        <label class="check"><input type="checkbox" name="tls_insecure" value="true"{{with .NewTarget.TLS}}{{if .Insecure}} checked{{end}}{{end}}><span>Do not verify the certificate (lab use)</span></label>
+      </fieldset>
+      <div class="form-end"><button class="btn btn-main">Add target</button></div>
+    </form>
+  </details>
+  {{else}}
+  <p class="hint pad">Attach a VAST cluster below before adding a target.</p>
+  {{end}}
+</section>
+
+<section class="card" aria-labelledby="clusters-title">
+  <div class="card-head">
+    <h2 id="clusters-title">VAST clusters</h2>
+    <span class="hint">Delta-V only reads a cluster: it logs in and lists CNodes, VIP pools and VIPs every {{seconds .Settings.VASTPollIntervalSeconds}}. It never changes anything on it.</span>
+  </div>
+  {{if .Clusters}}
+  <div class="scroll">
+  <table class="table">
+    <thead>
+      <tr>
+        <th scope="col">Cluster</th>
+        <th scope="col">Management host</th>
+        <th scope="col">User</th>
+        <th scope="col" class="num">CNodes</th>
+        <th scope="col" class="num">Pools</th>
+        <th scope="col" class="num">VIPs</th>
+        <th scope="col">Last read</th>
+        <th scope="col"><span class="sr">Action</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Clusters}}
+      <tr>
+        <th scope="row"><span class="name">{{.Name}}</span></th>
+        <td><code>{{.Host}}</code>{{if .Insecure}}<span class="sub">{{badge "warn" "Certificate not verified"}}</span>{{end}}</td>
+        <td>{{.User}}{{if .Tenant}}<span class="sub">tenant {{.Tenant}}</span>{{end}}</td>
+        <td class="num">{{count .CNodes}}</td>
+        <td class="num">{{count .Pools}}</td>
+        <td class="num">{{count .VIPs}}</td>
+        <td>
+          {{if .LastPoll}}{{ago $now (deref .LastPoll)}}{{else}}{{badge "pending" "Not yet"}}{{end}}
+          {{if .LastError}}<span class="sub wrap">{{badge "warn" "Last read failed"}} {{.LastError}}. Envoys keep the last good answer.</span>{{end}}
+        </td>
+        <td class="act">
+          {{if .Targets}}
+          <span class="sub">Used by {{.Targets}} {{if eq .Targets 1}}target{{else}}targets{{end}}</span>
+          {{else}}
+          <form method="post" action="/controls/clusters/remove" {{submit "/controls/clusters/remove"}} hx-confirm="Detach cluster {{.Name}}? Its stored credentials are deleted.">
+            <input type="hidden" name="name" value="{{.Name}}">
+            <button class="btn">Detach</button>
+          </form>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">No VAST cluster is attached.</p>
+  {{end}}
+  <details class="more" hx-morph-skip{{if or (eq .OpenForm "cluster") (not .Clusters)}} open{{end}}>
+    <summary>Attach a cluster</summary>
+    <form method="post" action="/controls/clusters" {{submit "/controls/clusters"}} class="form-grid">
+      <label class="field"><span>Name</span><input class="input" name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]*" value="{{.NewCluster.Name}}" autocomplete="off" spellcheck="false"><small>Your name for it here.</small></label>
+      <label class="field"><span>Management host</span><input class="input" name="host" required value="{{.NewCluster.Host}}" autocomplete="off" spellcheck="false"><small>Host or host:port. HTTPS is always used.</small></label>
+      <label class="field"><span>User</span><input class="input" name="user" required value="{{.NewCluster.User}}" autocomplete="off" spellcheck="false"><small>A read-only user is enough.</small></label>
+      <label class="field"><span>Password</span><input class="input" type="password" name="password" required autocomplete="new-password"><small>Kept in the daemon's state file, mode 0600. Never shown again.</small></label>
+      <label class="field"><span>Tenant <em>(optional)</em></span><input class="input" name="tenant" value="{{.NewCluster.Tenant}}" autocomplete="off" spellcheck="false"><small>Log in to this tenant instead of the default.</small></label>
+      <label class="check"><input type="checkbox" name="insecure" value="true"{{if .NewCluster.Insecure}} checked{{end}}><span>Skip certificate verification (lab clusters with self-signed certificates)</span></label>
+      <div class="form-end"><button class="btn btn-main">Attach</button><span class="hint">The cluster is read once first, so a wrong password or an untrusted certificate fails here.</span></div>
+    </form>
+  </details>
+</section>
+{{end}}
+{{end}}

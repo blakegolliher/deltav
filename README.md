@@ -5,14 +5,13 @@ the VIPs of one or more VAST clusters, with no proxy machines in the data path. 
 endpoints over xDS, collects telemetry from every Envoy over the streams Envoy opens, and shows
 what the fleet and the CNodes are doing.
 
-**Status: proof of concept; milestones 1 to 4, 6 and 7 of 8 are done.** Still to come: the web
-UI (5), then packaging with a quick start (8). The daemon reads healthy endpoints from VAST clusters (or takes a static list),
+**Status: proof of concept; milestones 1 to 7 of 8 are done.** Still to come: packaging with a
+quick start (8). The daemon reads healthy endpoints from VAST clusters (or takes a static list),
 serves them to Envoy over xDS and tracks every connected Envoy; it ingests Envoy's access logs and
 load reports and keeps rolling per-endpoint, per-CNode and per-Envoy stats, served by the
-`/api/v1` endpoints below and `/metrics`; the CLI and a terminal UI read that API; `deltav bootstrap` prints the client
-bootstrap; a test harness (`dvlab`) provides fake S3 backends and a load generator.
-See [docs/DESIGN.md](docs/DESIGN.md). A ten-minute quick start comes
-with milestone 8.
+`/api/v1` endpoints below and `/metrics`; a web UI, a terminal UI and the CLI all read that API;
+`deltav bootstrap` prints the client bootstrap; a test harness (`dvlab`) provides fake S3
+backends, a mock VAST API and a load generator. See [docs/DESIGN.md](docs/DESIGN.md).
 
 The binary is `deltav`, also installed as `dv`; the two behave identically.
 
@@ -32,7 +31,9 @@ make test         # vet, license gate, tests
 sudo make install # /usr/local/bin/deltav and dv
 ```
 
-`go build ./cmd/deltav` also works on its own.
+`go build ./cmd/deltav` also works on its own: the web UI's stylesheet is committed. After
+changing a page template or `internal/webui/tailwind.css`, run `make css`, which fetches the
+pinned Tailwind standalone CLI (no Node) and regenerates it.
 
 ## Attach a VAST cluster
 
@@ -89,6 +90,29 @@ daemon restart.
 
 ## Watch it
 
+The daemon serves a web UI on its HTTP address, `http://127.0.0.1:18080/` by default. It has four
+pages, kept current without reloading:
+
+- **Overview**: Envoys connected and their config state; requests, megabytes and 403/503 share
+  across all targets; CNodes over a limit; then a row per target.
+- **CNodes**: state as VAST reports it, VIPs hosted, requests in flight against each limit,
+  rates, latency and a five-minute sparkline. Open a row for its VIPs.
+- **Fleet**: every Envoy with version, last seen, config state (and Envoy's reason if it
+  rejected the config) and request rate. Search, filter, sort and paging are done by the daemon,
+  so the page is the same size with five thousand Envoys as with five.
+- **Controls**: set or remove a target's limit, drain and undrain CNodes, attach and detach
+  VAST clusters, add and remove targets.
+
+It follows the system's light or dark setting; the button in the top bar overrides that. From
+another machine, tunnel to it: `ssh -L 18080:127.0.0.1:18080 <daemon host>`, then open
+`http://localhost:18080/`.
+
+A daemon bound to anything but loopback requires a token (`DELTAV_API_TOKEN`), and the UI then
+asks for it once and keeps a 12-hour session cookie. Use a long random token, and put TLS in
+front of the daemon if the network is not trusted: it speaks plain HTTP. A daemon with no token
+answers only to loopback names (`127.0.0.1`, `localhost`), and in both cases a request that
+changes anything is refused if a browser says it comes from another site's page.
+
 ```sh
 deltav tui                    # live terminal UI
 deltav node list --vips       # CNodes with state, VIPs, requests in flight, rates and latency
@@ -126,6 +150,20 @@ bin/dvlab loadgen --endpoint http://127.0.0.1:9000 --bucket lab --requests 1000 
     --special-keys --expect --check   # through Envoy; fails if Host, path, Expect or body changed
 ```
 
+To try clusters, CNodes, limits and drain as well, put the mock VAST API in front of six fake
+backends (it serves a real cluster's sanitized responses; pool `main` has six VIPs on three CNodes):
+
+```sh
+IPS=127.0.0.11,127.0.0.12,127.0.0.13,127.0.0.14,127.0.0.15,127.0.0.16
+bin/dvlab fakes3 --listen ${IPS//,/:9100,}:9100 &
+bin/dvlab mockvast --pool-vips main=$IPS &          # prints its address and the command to attach it
+bin/deltav serve --state-dir ./state &
+DELTAV_PASSWORD=mock-password bin/deltav vast add mock --host 127.0.0.1:<port it printed> --user admin --insecure
+bin/deltav target add s3 --cluster mock --pool main --port 9100 --listen-port 9000
+```
+
+Then start Envoy and the load generator as above and open `http://127.0.0.1:18080/`.
+
 `make integration` runs the same arrangement as tests, with real Envoy processes, including one
 where a mock VAST (a real cluster's sanitized responses) supplies the endpoints. `make live
 ENV=<file>` does it on real equipment: a real VAST cluster, real Envoy, and round trips against a
@@ -148,6 +186,7 @@ is required when it is bound elsewhere). Stats take `?window=1m|5m|1h`.
 | `/api/v1/fleet` | Envoys with version, last seen, config state and stats. `?limit=&offset=`, `?sort=node_id\|request_rate\|last_seen\|connected_at\|envoy_version\|config_state\|address`, `?order=asc\|desc`, `?q=` (substring), `?state=acked\|nacked\|pending`, `?connected=true\|false`. |
 | `/api/v1/fleet/{node}` | One Envoy, every window. |
 | `/api/v1/events` | Server-sent events: the overview, every `?interval=` (default 2s). |
+| `/api/v1/settings` | How the daemon was started, as far as a UI needs it: the enforce-mode debounce, the VAST poll interval, whether a token is required. |
 
 "In flight" is the number of requests Envoys have outstanding to an endpoint, from load reports.
 S3 over HTTP/1.1 holds one request per connection, so it is the count of busy connections; idle

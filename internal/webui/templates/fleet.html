@@ -1,0 +1,89 @@
+{{define "fleet"}}
+<div class="toolbar">
+  <h1>Fleet</h1>
+  <div class="toolbar-end"><span class="hint">Request rate over the last</span>{{template "windows" .}}</div>
+</div>
+{{with .Fleet}}
+<div class="filters">
+  <form method="get" action="/fleet" class="search" role="search">
+    {{range .Hidden}}<input type="hidden" name="{{index . 0}}" value="{{index . 1}}">{{end}}
+    <label class="sr" for="fleet-q">Find Envoys by node ID, address or version</label>
+    <input class="input" id="fleet-q" type="search" name="q" value="{{.Filter}}" placeholder="Node ID, address or version" autocomplete="off" spellcheck="false">
+    <button class="btn">Find</button>
+  </form>
+  <div class="seg" role="group" aria-label="Config state">
+    {{range $i, $l := .States}}<a id="state-{{$i}}" href="{{$l.URL}}" {{partial $l.URL}}{{if $l.Active}} aria-current="true"{{end}}>{{$l.Label}}</a>{{end}}
+  </div>
+  <div class="seg" role="group" aria-label="Connection">
+    {{range $i, $l := .Links}}<a id="conn-{{$i}}" href="{{$l.URL}}" {{partial $l.URL}}{{if $l.Active}} aria-current="true"{{end}}>{{$l.Label}}</a>{{end}}
+  </div>
+  {{if .Filtered}}<a id="clear" class="btn btn-quiet" href="{{.Clear}}" {{partial .Clear}}>Clear filters</a>{{end}}
+</div>
+{{end}}
+<div id="live" hx-sse:connect="{{.LiveURL}}" hx-swap="innerMorph">{{template "fleet-live" .}}</div>
+{{end}}
+
+{{define "fleet-live"}}
+{{template "apierror" .}}
+{{$now := .Now}}
+{{with .Fleet}}
+<section class="card" aria-labelledby="fleet-title">
+  <div class="card-head">
+    <h2 id="fleet-title">
+      {{if .Rows}}Envoys {{count .From}} to {{count .To}} of {{count .Matched}}{{if .Filtered}} that match{{end}}{{else}}Envoys{{end}}
+    </h2>
+    <span class="hint">{{count .Connected}} connected of {{count .Total}} seen in the last hour · config version <code>{{.ConfigVersion}}</code></span>
+  </div>
+  {{if .Rows}}
+  <div class="scroll">
+  <table class="table">
+    <thead>
+      <tr>
+        {{range $i, $c := .Columns}}
+        <th scope="col"{{if $c.Numeric}} class="num"{{end}}{{if $c.Dir}} aria-sort="{{$c.Dir}}"{{end}}>
+          {{if $c.URL}}<a class="sort" id="sort-{{$i}}" href="{{$c.URL}}" {{partial $c.URL}}>{{$c.Label}}<svg class="sort-mark" viewBox="0 0 10 12" aria-hidden="true"><path class="up" d="M2 5l3-3 3 3"/><path class="down" d="M2 7l3 3 3-3"/></svg></a>{{else}}{{$c.Label}}{{end}}
+        </th>
+        {{end}}
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr id="{{.ID}}">
+        <th scope="row"><span class="name">{{.NodeID}}</span></th>
+        <td><code>{{.Address}}</code></td>
+        <td>{{.EnvoyVersion}}</td>
+        <td>{{ago $now .LastSeen}}</td>
+        <td>
+          {{memberState .Member}}
+          {{if .ConfigError}}<span class="sub wrap">{{.ConfigError}}</span>
+          {{else if .Behind}}<span class="sub">on <code>{{.ConfigVersion}}</code>, not the current one</span>{{end}}
+        </td>
+        <td class="num">{{rate .Stats.RequestRate}}</td>
+        <td class="num">{{count .InFlight}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else if .First}}
+  <p class="empty">This page is past the end of the list. <a id="first" href="{{.First}}" {{partial .First}}>Go to the first page</a>.</p>
+  {{else if .Filtered}}
+  <p class="empty">No Envoy matches. <a id="clear-2" href="{{.Clear}}" {{partial .Clear}}>Clear the filters</a>.</p>
+  {{else}}
+  <p class="empty">No Envoy has connected yet. Start one on a client host with the output of <code>deltav bootstrap</code>.</p>
+  {{end}}
+  <div class="pager">
+    <div class="pager-move">
+      {{if .Prev}}<a id="prev" class="btn" href="{{.Prev}}" {{partial .Prev}} rel="prev">Previous</a>{{else}}<span class="btn" aria-disabled="true">Previous</span>{{end}}
+      {{if .Next}}<a id="next" class="btn" href="{{.Next}}" {{partial .Next}} rel="next">Next</a>{{else}}<span class="btn" aria-disabled="true">Next</span>{{end}}
+    </div>
+    <div class="pager-size">
+      <span class="hint">Rows per page</span>
+      <div class="seg" role="group" aria-label="Rows per page">
+        {{range .Sizes}}<a id="size-{{.Label}}" href="{{.URL}}" {{partial .URL}}{{if .Active}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}
+      </div>
+    </div>
+  </div>
+</section>
+{{end}}
+{{end}}

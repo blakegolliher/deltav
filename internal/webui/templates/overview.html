@@ -1,0 +1,110 @@
+{{define "overview"}}
+<div class="toolbar">
+  <h1>Overview</h1>
+  <div class="toolbar-end"><span class="hint">Rates and latency over the last</span>{{template "windows" .}}</div>
+</div>
+<div id="live" hx-sse:connect="{{.LiveURL}}" hx-swap="innerMorph">{{template "overview-live" .}}</div>
+{{end}}
+
+{{define "overview-live"}}
+{{template "apierror" .}}
+{{with .Overview}}
+<section class="tiles" aria-label="Fleet and traffic, all targets">
+  <div class="tile">
+    <h2 class="tile-label">Envoys connected</h2>
+    <p class="tile-value">{{count .Fleet.Connected}}</p>
+    <p class="tile-note">of {{count .Fleet.Total}} seen in the last hour</p>
+    <ul class="tile-states">
+      <li>{{badge "good" "Accepted"}}<span>{{count .Fleet.Acked}}</span></li>
+      <li>{{badge "pending" "Pending"}}<span>{{count .Fleet.Pending}}</span></li>
+      <li>{{badge "crit" "Rejected"}}<span>{{count .Fleet.Nacked}}</span></li>
+    </ul>
+  </div>
+  <div class="tile">
+    <h2 class="tile-label">Requests per second</h2>
+    <p class="tile-value">{{rate .RequestRate}}</p>
+    <p class="tile-note">{{count .InFlight}} in flight now</p>
+    <div class="tile-trend">{{spark .History "All targets"}}<span class="hint">last 5 minutes</span></div>
+  </div>
+  <div class="tile">
+    <h2 class="tile-label">Megabytes per second</h2>
+    <p class="tile-value">{{mbps (sum .InRate .OutRate)}}</p>
+    <dl class="tile-pairs">
+      <div><dt>In, client to VAST</dt><dd>{{mbps .InRate}}</dd></div>
+      <div><dt>Out, VAST to client</dt><dd>{{mbps .OutRate}}</dd></div>
+    </dl>
+  </div>
+  <div class="tile">
+    <h2 class="tile-label">Errors, share of requests</h2>
+    <dl class="tile-pairs tile-pairs-big">
+      <div><dt>403</dt><dd>{{share .S403 .Requests}}</dd></div>
+      <div><dt>503</dt><dd>{{share .S503 .Requests}}</dd></div>
+    </dl>
+    <p class="tile-note">{{rate .Rate403}} and {{rate .Rate503}} per second</p>
+  </div>
+  <div class="tile">
+    <h2 class="tile-label">CNodes over a limit</h2>
+    <p class="tile-value">{{len .Over}}</p>
+    {{if not .Limits}}
+    <p class="tile-note">No target has a limit. Set one under <a href="/controls">Controls</a>.</p>
+    {{else if .Over}}
+    <ul class="tile-states">
+      {{range .Over}}<li>{{badge "crit" .CNode}}<span>{{count .InFlight}} of {{count .PerCNode}}, {{.Target}}</span></li>{{end}}
+    </ul>
+    {{else}}
+    <p class="tile-note">{{badge "good" "All within their limits"}}</p>
+    {{end}}
+  </div>
+</section>
+
+<section class="card" aria-labelledby="targets-title">
+  <div class="card-head">
+    <h2 id="targets-title">Targets</h2>
+    <span class="hint">config version <code>{{.ConfigVersion}}</code></span>
+  </div>
+  {{if .Targets}}
+  <div class="scroll">
+  <table class="table">
+    <thead>
+      <tr>
+        <th scope="col">Target</th>
+        <th scope="col" title="Addresses served to Envoys, of the VIPs in the pool">Endpoints</th>
+        {{template "stat-heads"}}
+        <th scope="col" title="Connections the fleet may hold to one CNode">Limit per CNode</th>
+        <th scope="col" title="Requests per second in ten-second steps, each line scaled to its own peak">Last 5 minutes</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Targets}}
+      <tr id="target-{{.Name}}">
+        <th scope="row">
+          <span class="name">{{.Name}}</span>
+          <span class="sub">127.0.0.1:{{.ListenPort}}{{if .TLS}}, TLS to VAST{{end}}{{if .Pool}} · pool {{.Pool}} on {{.Cluster}}{{else if eq .Source "static"}} · static{{end}}</span>
+        </th>
+        <td>
+          {{if .Status}}
+            {{count .Endpoints}} of {{count .Status.VIPs}} VIPs
+            {{if .Status.Problem}}<span class="sub">{{badge "crit" "Not resolved"}} {{.Status.Problem}}</span>
+            {{else if .Status.Held}}<span class="sub">{{badge "warn" "Held"}} serving the last known list</span>
+            {{else if .Status.Drained}}<span class="sub">{{badge "paused" "Drained"}} {{count .Status.Drained}} withheld</span>{{end}}
+          {{else}}{{count .Endpoints}}{{end}}
+        </td>
+        {{template "stat-cells" .}}
+        <td>
+          {{if .Limit}}
+            {{count .Limit.PerCNode}}, {{if eq .Limit.Mode "enforce"}}enforced{{else}}alert only{{end}}
+            {{if .Over}}<span class="sub">{{badge "crit" "Over"}} {{range $i, $o := .Over}}{{if $i}}, {{end}}{{$o.CNode}} at {{count $o.InFlight}}{{end}}</span>{{end}}
+          {{else}}<span class="quiet">None</span>{{end}}
+        </td>
+        <td>{{spark .RateHistory .Name}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">No targets yet. Attach a VAST cluster and add a target under <a href="/controls">Controls</a>, or from a shell: <code>deltav vast add</code>, then <code>deltav target add</code>.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

@@ -1,0 +1,241 @@
+/*
+ * The web UI's stylesheet source. `make css` runs the Tailwind standalone CLI
+ * over this file and the templates and writes static/app.css, which is
+ * committed. Edit this file or a template, then run `make css`.
+ *
+ * Colors are roles, not hues: every rule below names a role (surface, ink,
+ * line, accent, good, ...) and the roles are given their light and dark
+ * values once, in :root, with light-dark(). The page follows the system's
+ * setting; the theme button pins one scheme through data-theme.
+ */
+@import "tailwindcss" source(none);
+@source "./templates";
+@source "./views.go";
+@source "./format.go";
+
+@theme {
+  --color-*: initial;
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@theme inline {
+  --color-plane: var(--dv-plane);
+  --color-surface: var(--dv-surface);
+  --color-sunken: var(--dv-sunken);
+  --color-ink: var(--dv-ink);
+  --color-ink-2: var(--dv-ink-2);
+  --color-ink-3: var(--dv-ink-3);
+  --color-line: var(--dv-line);
+  --color-rule: var(--dv-rule);
+  --color-accent: var(--dv-accent);
+  --color-accent-ink: var(--dv-accent-ink);
+  --color-good: var(--dv-good);
+  --color-warn: var(--dv-warn);
+  --color-crit: var(--dv-crit);
+}
+
+:root {
+  color-scheme: light dark;
+  --dv-plane: light-dark(#f9f9f7, #0d0d0d);       /* behind everything */
+  --dv-surface: light-dark(#fcfcfb, #1a1a19);     /* cards, tables, the top bar */
+  --dv-sunken: light-dark(#f1f0eb, #252523);      /* hover, selected, opened rows */
+  --dv-ink: light-dark(#0b0b0b, #f0efec);         /* text */
+  --dv-ink-2: light-dark(#52514e, #c3c2b7);       /* headers, labels */
+  --dv-ink-3: light-dark(#6c6a65, #9f9d95);       /* notes, units */
+  --dv-line: light-dark(#e1e0d9, #2c2c2a);        /* hairlines */
+  --dv-rule: light-dark(#c3c2b7, #454541);        /* control borders, header rules */
+  --dv-accent: light-dark(#2a78d6, #3987e5);      /* the one data color */
+  --dv-accent-ink: light-dark(#1c5cab, #86b6ef);  /* links */
+  --dv-accent-wash: light-dark(#cde2fb, #0d366b); /* a meter's unfilled track */
+  --dv-trend: #898781;                            /* a sparkline's past */
+  --dv-good: #0ca30c;
+  --dv-warn: #fab219;
+  --dv-crit: #d03b3b;
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+@layer base {
+  body { @apply min-h-screen bg-plane font-sans text-sm text-ink antialiased; }
+  code { @apply font-mono text-[0.92em]; }
+  :focus-visible { outline: 2px solid var(--dv-accent); outline-offset: 2px; }
+  ::selection { background: var(--dv-accent-wash); }
+  h1 { @apply text-lg font-semibold tracking-tight; }
+  h2 { @apply text-sm font-semibold; }
+}
+
+@layer components {
+  /* ---- Frame ---- */
+  .skip { @apply sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-20 focus:rounded-md focus:bg-surface focus:px-3 focus:py-2; }
+  .sr { @apply sr-only; }
+  .topbar { @apply sticky top-0 z-10 border-b border-line bg-surface; }
+  .topbar-in { @apply mx-auto flex min-h-12 max-w-[1600px] flex-wrap items-center gap-x-6 gap-y-1 px-4 py-1.5; }
+  .brand { @apply text-base font-semibold tracking-tight; }
+  .nav { @apply flex gap-1; }
+  .nav a { @apply rounded-md px-3 py-1.5 text-ink-2 hover:bg-sunken hover:text-ink; }
+  .nav a[aria-current="page"] { @apply bg-sunken font-semibold text-ink; }
+  .topbar-end { @apply ml-auto flex items-center gap-1; }
+  .main { @apply mx-auto grid max-w-[1600px] gap-4 px-4 py-4; }
+  .toolbar { @apply flex flex-wrap items-center justify-between gap-x-6 gap-y-2; }
+  .toolbar-end { @apply flex items-center gap-2; }
+  .hint { @apply text-xs text-ink-3; }
+  .quiet { @apply text-ink-3; }
+  .pad { @apply px-4 py-3; }
+  .main p a, .empty a { @apply text-accent-ink underline underline-offset-2; }
+
+  /* Whether the page is being kept current: a dot and the word for it. */
+  .live-state { @apply mr-2 inline-flex items-center gap-1.5 text-xs text-ink-2; }
+  .live-dot { @apply size-2 rounded-full border border-ink-3; }
+  .live-state[data-state="live"] .live-dot { border-color: var(--dv-good); background: var(--dv-good); }
+  .live-state[data-state="connecting"] .live-dot { border-color: var(--dv-ink-2); border-style: dashed; }
+  .live-state[data-state="lost"] .live-dot { border-color: var(--dv-crit); background: var(--dv-crit); border-radius: 1px; }
+
+  /* ---- Controls ---- */
+  .btn { @apply inline-flex h-8 cursor-pointer items-center justify-center whitespace-nowrap rounded-md border border-rule bg-surface px-3 text-sm font-medium text-ink hover:bg-sunken; }
+  .btn[aria-disabled="true"], .btn:disabled { @apply pointer-events-none opacity-45; }
+  .btn-main { @apply border-ink bg-ink text-surface hover:bg-ink hover:opacity-85; }
+  .btn-quiet { @apply border-transparent bg-transparent font-normal text-ink-2 hover:text-ink; }
+  .htmx-request .btn { @apply opacity-60; }
+  .input { @apply h-8 rounded-md border border-rule bg-surface px-2.5 text-sm text-ink; }
+  .input::placeholder { color: var(--dv-ink-3); }
+  .input-num { @apply w-32 tabular-nums; }
+  .seg { @apply inline-flex rounded-md border border-line bg-surface p-0.5; }
+  .seg a { @apply rounded px-2.5 py-1 text-xs text-ink-2 hover:text-ink; }
+  .seg a[aria-current="true"] { @apply bg-sunken font-semibold text-ink; }
+  .field { @apply flex flex-col gap-1; }
+  .field > span, .field-set > legend { @apply text-xs font-semibold text-ink-2; }
+  .field > span em { @apply font-normal not-italic text-ink-3; }
+  .field > small { @apply text-xs text-ink-3; }
+  .check { @apply flex items-center gap-2; }
+  .check input { accent-color: var(--dv-accent); }
+  .form-row { @apply flex flex-wrap items-end gap-3; }
+  .form-grid { @apply grid gap-4 px-4 pb-4; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+  .form-end { @apply col-span-full flex flex-wrap items-center gap-3; }
+  .field-set { @apply col-span-full grid gap-4 border-t border-line pt-3; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+  .field-set > .check { @apply col-span-full; }
+  .filters { @apply flex flex-wrap items-center gap-3; }
+  .search { @apply flex gap-2; }
+  .search .input { @apply w-72 max-w-full; }
+
+  /* ---- Notes: an outcome or a warning, as an icon, a word and a sentence ---- */
+  .note { @apply flex items-start gap-3 rounded-lg border px-4 py-3; }
+  .note p { @apply min-w-0 break-words; }
+  .note-ok { border-color: color-mix(in oklab, var(--dv-good) 45%, var(--dv-line)); background: color-mix(in oklab, var(--dv-good) 7%, var(--dv-surface)); }
+  .note-bad { border-color: color-mix(in oklab, var(--dv-crit) 45%, var(--dv-line)); background: color-mix(in oklab, var(--dv-crit) 7%, var(--dv-surface)); }
+  #live { @apply grid gap-4; }
+
+  /* ---- State: an icon and a word, never a color alone ---- */
+  .badge { @apply inline-flex items-center gap-1 whitespace-nowrap align-middle text-xs font-medium text-ink; }
+  .ico { @apply size-3.5 flex-none; }
+  .ico-good { color: var(--dv-good); }
+  .ico-warn { color: var(--dv-warn); }
+  .ico-crit { color: var(--dv-crit); }
+  .ico-paused, .ico-pending { color: var(--dv-ink-2); }
+  .ico-idle { color: var(--dv-ink-3); }
+  .ico-fill { fill: currentColor; }
+  .ico-round { stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; }
+  .ico-cut { fill: none; stroke: var(--dv-surface); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .ico-mark { fill: none; stroke: #0b0b0b; stroke-width: 1.6; stroke-linecap: round; }
+  .ico-dot { fill: #0b0b0b; }
+  .ico-ring { fill: none; stroke: currentColor; stroke-width: 1.6; }
+  .ico-line { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* ---- Figures ---- */
+  .tiles { @apply grid gap-3; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
+  .tile { @apply flex min-w-0 flex-col gap-0.5 rounded-lg border border-line bg-surface p-4; }
+  .tile-label { @apply text-xs font-semibold text-ink-2; }
+  .tile-value { @apply text-3xl font-semibold leading-tight tracking-tight; }
+  .tile-note { @apply text-xs text-ink-3; }
+  .tile-states { @apply mt-2 grid gap-1 text-xs; }
+  .tile-states li { @apply flex items-center justify-between gap-3; }
+  .tile-states li > span:last-child { @apply text-right tabular-nums text-ink-2; }
+  .tile-pairs { @apply mt-2 grid gap-1 text-xs; }
+  .tile-pairs > div { @apply flex items-baseline justify-between gap-3; }
+  .tile-pairs dt { @apply text-ink-2; }
+  .tile-pairs dd { @apply tabular-nums; }
+  .tile-pairs-big { @apply mt-0 flex gap-8; }
+  .tile-pairs-big > div { @apply flex-col items-start justify-start gap-0; }
+  .tile-pairs-big dd { @apply text-3xl font-semibold leading-tight tracking-tight; font-variant-numeric: normal; }
+  .tile-trend { @apply mt-auto flex items-end justify-between gap-2 pt-2; }
+
+  /* A sparkline: the past in a quiet gray, the latest value marked in the
+     accent with a ring of the surface around it. */
+  .spark { @apply block max-w-full; }
+  .spark-line { fill: none; stroke: var(--dv-trend); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+  .spark-area { fill: var(--dv-trend); opacity: 0.1; }
+  .spark-now { fill: var(--dv-accent); stroke: var(--dv-surface); stroke-width: 2; }
+  .spark-flat { stroke: var(--dv-rule); stroke-width: 1; }
+
+  /* A meter: the fill says how close to the limit, its track is a lighter
+     step of the same color. */
+  .meter { @apply block; }
+  .meter-track { fill: var(--dv-accent-wash); }
+  .meter-fill { fill: var(--dv-accent); }
+  .meter-near .meter-fill { fill: var(--dv-warn); }
+  .meter-near .meter-track { fill: color-mix(in oklab, var(--dv-warn) 28%, var(--dv-surface)); }
+  .meter-over .meter-fill { fill: var(--dv-crit); }
+  .meter-over .meter-track { fill: color-mix(in oklab, var(--dv-crit) 28%, var(--dv-surface)); }
+  .limit { @apply mt-1 flex flex-col items-end gap-0.5; }
+
+  /* ---- Cards and tables ---- */
+  .card { @apply min-w-0 rounded-lg border border-line bg-surface; }
+  .card-head { @apply flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 border-b border-line px-4 py-3; }
+  .card-head .hint { @apply max-w-[80ch]; }
+  .scroll { @apply overflow-x-auto; }
+  .empty { @apply px-4 py-6 text-ink-2; }
+  .table { @apply w-full border-collapse; }
+  .table th, .table td { @apply border-b border-line px-3 py-2 text-left align-top font-normal; }
+  .table th:first-child, .table td:first-child { @apply pl-4; }
+  .table th:last-child, .table td:last-child { @apply pr-4; }
+  .table thead th { @apply whitespace-nowrap border-rule text-xs font-semibold text-ink-2; }
+  .table tbody:last-child > tr:last-child > * { @apply border-b-0; }
+  .table tbody > tr:hover { background: color-mix(in oklab, var(--dv-sunken) 55%, var(--dv-surface)); }
+  .table .num { @apply whitespace-nowrap text-right tabular-nums; }
+  .table .act { @apply whitespace-nowrap text-right; }
+  .name { @apply font-semibold; }
+  .sub { @apply mt-0.5 block text-xs font-normal text-ink-3; }
+  .wrap { @apply max-w-[60ch] whitespace-normal break-words; }
+  /* A count of failures that is not zero stands out by weight and a mark. */
+  .flagged { @apply font-semibold; }
+  .flagged::before { content: ""; @apply mr-1.5 inline-block size-1.5 rounded-full align-middle; background: var(--dv-warn); }
+
+  .sort { @apply inline-flex items-center gap-1 hover:text-ink; }
+  .sort-mark { @apply h-3 w-2.5; fill: none; stroke: var(--dv-ink-3); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  th[aria-sort] .sort { @apply text-ink; }
+  th[aria-sort="ascending"] .sort-mark .up, th[aria-sort="descending"] .sort-mark .down { stroke: var(--dv-ink); stroke-width: 2; }
+  th[aria-sort="ascending"] .sort-mark .down, th[aria-sort="descending"] .sort-mark .up { opacity: 0.35; }
+
+  .toggle { @apply inline-flex items-center gap-1.5 rounded; }
+  .chev { @apply size-3.5 flex-none; fill: none; stroke: var(--dv-ink-2); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  .table tr.opened, .table tr.opened:hover, .table tr.detail, .table tr.detail:hover { background: var(--dv-sunken); }
+  .table tr.detail > td { @apply p-0 pb-3 pl-9 pr-4; }
+  .table-inner { @apply rounded-md border border-line bg-surface; border-collapse: separate; border-spacing: 0; }
+  .table-inner caption { @apply sr-only; }
+  .pager { @apply flex flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-3; }
+  .pager-move, .pager-size { @apply flex items-center gap-2; }
+
+  /* ---- Controls page ---- */
+  .split { @apply grid; }
+  .split-main { @apply min-w-0; }
+  .split-aside { @apply border-t border-line; }
+  @media (width >= 72rem) {
+    .split { grid-template-columns: minmax(0, 1fr) minmax(0, 30rem); }
+    .split-aside { @apply border-l border-t-0; }
+  }
+  .explain { @apply grid content-start gap-2 p-4 text-xs leading-relaxed text-ink-2; }
+  .explain strong { @apply font-semibold text-ink; }
+  .explain ol { @apply grid list-decimal gap-2 pl-4; }
+  .control { @apply flex flex-wrap items-start justify-between gap-x-8 gap-y-3 border-b border-line px-4 py-3 last:border-b-0; }
+  .control-what { @apply min-w-0 max-w-[60ch]; }
+  .control-state { @apply mt-1 font-medium; }
+  .control-how { @apply flex flex-wrap items-end gap-2; }
+  .more { @apply border-t border-line; }
+  .more > summary { @apply cursor-pointer px-4 py-3 font-medium; }
+  .more[open] > summary { @apply pb-4; }
+
+  /* ---- Login ---- */
+  .login { @apply grid min-h-screen place-items-center p-4; }
+  .login-card { @apply grid w-full max-w-sm gap-4 p-6; }
+}
