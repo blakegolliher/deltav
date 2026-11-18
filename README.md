@@ -14,6 +14,10 @@ read that API; connection limits, drain and rate rules act on the fleet; systemd
 daemon and the clients' Envoys; a test harness (`dvlab`) provides fake S3 backends, a mock VAST
 API and a load generator. See [docs/DESIGN.md](docs/DESIGN.md).
 
+**Known problems are listed in [docs/OPEN_ITEMS.md](docs/OPEN_ITEMS.md).** Three of them bear on
+whether a rate rule can be relied on: a rule change does not reach connections that are already
+open, a slow rule can be beaten by pausing, and an encoded bucket name slips past a bucket filter.
+
 The binary is `deltav`, also installed as `dv`; the two behave identically.
 
 ## Pinned versions
