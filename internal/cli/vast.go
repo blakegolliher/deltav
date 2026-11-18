@@ -241,12 +241,13 @@ type targetRow struct {
 	Pool       string
 	Endpoints  []struct{ IP string }
 	Status     *struct {
-		VIPs    int
-		Healthy int
-		Drained int
-		Problem string
-		Held    bool
-		Limit   *limitStatus
+		VIPs     int
+		Healthy  int
+		Drained  int
+		Unusable int
+		Problem  string
+		Held     bool
+		Limit    *limitStatus
 	}
 	Over []struct {
 		CNode    string
@@ -281,6 +282,9 @@ func (t targetRow) status() string {
 	s := fmt.Sprintf("%d of %d VIPs on healthy CNodes", t.Status.Healthy, t.Status.VIPs)
 	if t.Status.Drained > 0 {
 		s += fmt.Sprintf(", %d withheld by drain", t.Status.Drained)
+	}
+	if t.Status.Unusable > 0 {
+		s += fmt.Sprintf(", %d left out: VAST gave no usable address", t.Status.Unusable)
 	}
 	for _, o := range t.Over {
 		s += fmt.Sprintf("; OVER THE LIMIT on %s (%d in flight)", o.CNode, o.InFlight)

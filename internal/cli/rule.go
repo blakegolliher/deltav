@@ -18,7 +18,7 @@ import (
 
 func newRuleCmd() *cobra.Command {
 	return group("rule", "Request-rate rules: limit S3 requests by operation, access key, bucket or prefix",
-		newRuleListCmd(), newRuleShowCmd(), newRuleSetCmd(), newRuleRemoveCmd(), newRuleOperationsCmd())
+		newRuleListCmd(), newRuleShowCmd(), newRuleSetCmd(), newRuleRemoveCmd(), newRuleRefusalsCmd(), newRuleOperationsCmd())
 }
 
 // ruleStatus is a rule as the API returns it.
@@ -32,6 +32,7 @@ type ruleStatus struct {
 type rulesList struct {
 	Rules    []ruleStatus `json:"rules"`
 	Overflow uint64       `json:"overflow"`
+	Slots    int          `json:"slots"`
 }
 
 func some(values []string) string {
@@ -79,11 +80,18 @@ func newRuleListCmd() *cobra.Command {
 		Short: "List the rate rules, in the order they apply, with what Envoys last reported",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			var sentences []string
+			var sentences, notes []string
 			err := show(cmd, &f, "/api/v1/rules", "NAME\tLIMIT\tPER\tOPERATION\tONLY FOR\tRESPOND\tKEYS\tALLOWED/S\tREFUSED/S",
 				func(v rulesList) [][]string {
 					var rows [][]string
+					limits := 0
 					for _, r := range v.Rules {
+						if !r.Blocked {
+							limits++
+						}
+						if note := r.Rule.HoldNote(r.Status); note != "" {
+							notes = append(notes, r.Name+": "+note)
+						}
 						per := strings.Join(r.Per, ", ")
 						if per == "" {
 							per = "-"
@@ -91,6 +99,9 @@ func newRuleListCmd() *cobra.Command {
 						rows = append(rows, []string{r.Name, r.Limit, per, some(r.Operation), onlyFor(r.Rule), fmt.Sprint(r.Respond),
 							fmt.Sprint(r.Status.Keys), perSecond(r.Status.AllowedRate), perSecond(r.Status.DeniedRate)})
 						sentences = append(sentences, r.Name+": "+r.Sentence)
+					}
+					if v.Slots > 0 && limits > v.Slots {
+						notes = append(notes, fmt.Sprintf("One request can be limited by at most %d rules. One that matches more is limited by the first %d in this order; blocked rules always apply.", v.Slots, v.Slots))
 					}
 					return rows
 				})
@@ -105,10 +116,75 @@ func newRuleListCmd() *cobra.Command {
 			for _, s := range sentences {
 				fmt.Fprintln(out(cmd), s)
 			}
+			if len(notes) > 0 {
+				fmt.Fprintln(out(cmd))
+				for _, n := range notes {
+					fmt.Fprintln(out(cmd), n)
+				}
+			}
 			return nil
 		},
 	}
 	clientFlags(cmd, &f)
+	cmd.Flags().BoolVar(&f.json, "json", false, "print the API response as JSON")
+	return annotateEnv(cmd)
+}
+
+type refusalsList struct {
+	Refusals []ratelimit.Refusal `json:"refusals"`
+}
+
+func newRuleRefusalsCmd() *cobra.Command {
+	var (
+		f     apiFlags
+		limit int
+	)
+	cmd := &cobra.Command{
+		Use:   "refusals",
+		Short: "List the latest requests that rules refused, newest first",
+		Long: "List the latest requests that rules refused, newest first: when, on which client\n" +
+			"host, under which rule, and what the request was.\n\n" +
+			"The daemon remembers the latest thousand, and forgets them when it stops; the\n" +
+			"counts in \"rule list\" cover every refusal. For a request over a limit that was\n" +
+			"counted by several rules, Envoy does not say which of them refused it: they are\n" +
+			"all named. The access key is the one the request claimed, before VAST checked it.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if limit < 1 {
+				return errors.New("--limit: a number of refusals, 1 or more")
+			}
+			empty := false
+			err := show(cmd, &f, fmt.Sprintf("/api/v1/refusals?limit=%d", limit), "TIME\tCLIENT\tTARGET\tRULE\tOPERATION\tACCESS KEY\tBUCKET\tSTATUS",
+				func(v refusalsList) [][]string {
+					var rows [][]string
+					for _, r := range v.Refusals {
+						rule := strings.Join(r.Rules, " or ")
+						switch {
+						case rule == "":
+							rule = "-"
+						case r.Blocked:
+							rule += " (blocked)"
+						}
+						dash := func(s string) string {
+							if s == "" {
+								return "-"
+							}
+							return s
+						}
+						rows = append(rows, []string{r.At.Local().Format("2006-01-02 15:04:05"), r.Client, r.Target, rule,
+							dash(r.Operation), dash(r.AccessKey), dash(r.Bucket), fmt.Sprint(r.Status)})
+					}
+					empty = len(rows) == 0
+					return rows
+				})
+			if err == nil && !f.json && empty {
+				fmt.Fprintln(out(cmd), "No rule has refused a request since the daemon started.")
+			}
+			return err
+		},
+	}
+	clientFlags(cmd, &f)
+	cmd.Flags().IntVar(&limit, "limit", 50, "how many to list, at most 1000")
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the API response as JSON")
 	return annotateEnv(cmd)
 }
@@ -135,8 +211,13 @@ func newRuleShowCmd() *cobra.Command {
 				}
 				fmt.Fprintf(w, "Now: %s allowed and %s refused per second, on %d Envoys; %d allowed and %d refused since the daemon started.\n",
 					perSecond(r.Status.AllowedRate), perSecond(r.Status.DeniedRate), r.Status.Envoys, r.Status.Totals.Allowed, r.Status.Totals.Denied)
+				if note := r.Rule.HoldNote(r.Status); note != "" {
+					fmt.Fprintln(w, note)
+				}
 				if len(r.Status.Top) == 0 {
-					fmt.Fprintln(w, "Nothing has matched it in the last few seconds.")
+					if !r.Blocked {
+						fmt.Fprintln(w, "Nothing has matched it in the last few seconds.")
+					}
 					return nil
 				}
 				fmt.Fprintln(w)
@@ -181,9 +262,16 @@ func newRuleSetCmd() *cobra.Command {
 			"what S3 SDKs retry. The AWS CLI retries it only twice by default: for a low limit set\n" +
 			"AWS_RETRY_MODE=adaptive on the client, or give the rule a --burst as large as the\n" +
 			"client's concurrency. --respond 429 answers 429 instead, which the AWS CLI does not\n" +
-			"retry at all. A request that matches several rules must be allowed by each. If the\n" +
-			"daemon is unreachable for more than ten minutes, rules stop being enforced until it\n" +
-			"is back.\n\n" +
+			"retry at all.\n\n" +
+			"A request that matches several rules must be allowed by each; at most 4 rules can\n" +
+			"limit one request, the first 4 it matches in the order of \"rule list\", and a blocked\n" +
+			"rule always applies. A rule takes effect on the next request of every connection,\n" +
+			"open or new. A request is counted by what it claims to be, before VAST checks its\n" +
+			"signature: someone who knows an access key ID can use up that key's limit with\n" +
+			"requests VAST will reject. Add client to --per where that matters.\n\n" +
+			"If the daemon cannot be reached, blocked rules go on refusing, and each Envoy keeps\n" +
+			"the share of a limit it had for ten minutes. After that, limits are not enforced\n" +
+			"until the daemon is back.\n\n" +
 			"Examples:\n\n" +
 			"  deltav rule set uploads --operation PutObject,UploadPart --per-second 2000 --per access_key\n" +
 			"  deltav rule set listings --operation 'List*' --per-minute 600 --per total\n" +

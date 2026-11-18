@@ -95,6 +95,7 @@ type Server struct {
 	store     *state.Store
 	poller    *poller
 	quota     *ratelimit.Server
+	rulesMu   sync.Mutex // held across a change to the rules and its undoing
 
 	staticMu sync.RWMutex
 	static   []xds.TargetSpec // the static targets; see SetStaticTargets
@@ -165,6 +166,10 @@ func New(cfg Config) (*Server, error) {
 	s.quota = ratelimit.NewServer(log)
 	s.quota.Register(s.grpc)
 	s.quota.SetRules(store.Rules())
+	// Envoys answer some requests themselves on a rule's say-so. Those
+	// reach the daemon in the access log like any other request; the quota
+	// service keeps the record of them.
+	s.telemetry.OnRefusals(s.quota.Refusals)
 	s.poller = newPoller(s, cfg.VASTPollInterval)
 	// Before any Envoy can connect: serve the VAST targets with the
 	// endpoints they had at the last shutdown. An Envoy that reconnects to
@@ -231,6 +236,7 @@ func (s *Server) apiRoutes() *http.ServeMux {
 	mux.HandleFunc("PUT /api/v1/rules/{name}", s.handleRuleSet)
 	mux.HandleFunc("DELETE /api/v1/rules/{name}", s.handleRuleRemove)
 	mux.HandleFunc("GET /api/v1/s3-operations", s.handleOperations)
+	mux.HandleFunc("GET /api/v1/refusals", s.handleRefusals)
 	mux.HandleFunc("GET /api/v1/cnodes", s.handleCNodes)
 	mux.HandleFunc("GET /api/v1/endpoints", s.handleEndpoints)
 	mux.HandleFunc("GET /api/v1/fleet", s.handleFleet)

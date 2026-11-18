@@ -17,6 +17,7 @@ import (
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	upstreamhttpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -43,7 +44,7 @@ type TargetSpec struct {
 	AccessLog    bool   // stream per-request entries to the daemon (ALS)
 	PerHostLimit uint32 // enforce mode: per_host_thresholds.max_connections; 0 = none
 	// RateLimits are the request-rate rules, normalized, in the order they
-	// are applied (see ratelimit.go).
+	// are applied (see ratelimit.go). They go in the route, not the listener.
 	RateLimits []ratelimit.Rule
 }
 
@@ -79,43 +80,61 @@ const (
 	defaultHCInterval   = 15 * time.Second
 )
 
-// Resources renders the listener, cluster and endpoint assignment for t.
-func (t TargetSpec) Resources() (*listenerv3.Listener, *clusterv3.Cluster, *endpointv3.ClusterLoadAssignment, error) {
-	if t.Name == "" || t.ListenPort == 0 || t.ListenPort > 65535 {
-		return nil, nil, nil, fmt.Errorf("target %q: name and a listen port 1-65535 are required", t.Name)
-	}
-	l, err := t.listener()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	c, err := t.cluster()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	e, err := t.loadAssignment()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	for _, m := range []interface{ ValidateAll() error }{l, c, e} {
-		if err := m.ValidateAll(); err != nil {
-			return nil, nil, nil, fmt.Errorf("target %q: %w", t.Name, err)
-		}
-	}
-	return l, c, e, nil
+// Rendered is one target as Envoy resources.
+type Rendered struct {
+	Listener  *listenerv3.Listener
+	Route     *routev3.RouteConfiguration
+	Cluster   *clusterv3.Cluster
+	Endpoints *endpointv3.ClusterLoadAssignment
 }
 
-func (t TargetSpec) listener() (*listenerv3.Listener, error) {
-	limiters, marks, err := t.rateLimitFilters()
+// Resources renders the listener, route table, cluster and endpoint
+// assignment for t.
+func (t TargetSpec) Resources() (Rendered, error) {
+	if t.Name == "" || t.ListenPort == 0 || t.ListenPort > 65535 {
+		return Rendered{}, fmt.Errorf("target %q: name and a listen port 1-65535 are required", t.Name)
+	}
+	var (
+		r   Rendered
+		err error
+	)
+	if r.Listener, err = t.listener(); err != nil {
+		return Rendered{}, err
+	}
+	if r.Route, err = t.route(); err != nil {
+		return Rendered{}, err
+	}
+	if r.Cluster, err = t.cluster(); err != nil {
+		return Rendered{}, err
+	}
+	if r.Endpoints, err = t.loadAssignment(); err != nil {
+		return Rendered{}, err
+	}
+	for _, m := range []interface{ ValidateAll() error }{r.Listener, r.Route, r.Cluster, r.Endpoints} {
+		if err := m.ValidateAll(); err != nil {
+			return Rendered{}, fmt.Errorf("target %q: %w", t.Name, err)
+		}
+	}
+	return r, nil
+}
+
+// route is the target's route table, which Envoy fetches by the target's
+// name (RDS). It is a resource of its own, and not part of the listener,
+// because of what it carries: the rate-limit rules. Envoy applies a new
+// route table to the next request on every connection, where a new
+// listener reaches only connections opened after it (see ratelimit.go).
+func (t TargetSpec) route() (*routev3.RouteConfiguration, error) {
+	limits, marks, err := t.routeLimits()
 	if err != nil {
 		return nil, err
 	}
-	route := &routev3.RouteConfiguration{
+	return &routev3.RouteConfiguration{
 		Name: t.Name,
-		// An inline route table is validated against known clusters by
-		// default, so a listener that reaches Envoy ahead of its cluster
-		// would be rejected. Pushes are ordered clusters-first, but an ACK
-		// in flight during a push can reorder them on one stream; accept the
-		// listener and let it answer 503 for the moment the cluster is late.
+		// A route table is validated against known clusters by default, so
+		// one that reaches Envoy ahead of its cluster would be rejected.
+		// Pushes are ordered clusters-first, but an ACK in flight during a
+		// push can reorder them on one stream; accept the routes and let
+		// them answer 503 for the moment the cluster is late.
 		ValidateClusters: wrapperspb.Bool(false),
 		VirtualHosts: []*routev3.VirtualHost{{
 			Name:    t.Name,
@@ -132,17 +151,31 @@ func (t TargetSpec) listener() (*listenerv3.Listener, error) {
 				// What the rate-limit script wrote for the quota filters
 				// is not for VAST to see.
 				RequestHeadersToRemove: marks,
+				TypedPerFilterConfig:   limits,
 			}},
 		}},
+	}, nil
+}
+
+func (t TargetSpec) listener() (*listenerv3.Listener, error) {
+	limiters, err := rateLimitFilters()
+	if err != nil {
+		return nil, err
 	}
-	router, err := anypb.New(&routerv3.Router{SuppressEnvoyHeaders: true})
+	router, err := toAny(&routerv3.Router{SuppressEnvoyHeaders: true})
 	if err != nil {
 		return nil, err
 	}
 	hcm := &hcmv3.HttpConnectionManager{
-		StatPrefix:     t.Name,
-		CodecType:      hcmv3.HttpConnectionManager_AUTO,
-		RouteSpecifier: &hcmv3.HttpConnectionManager_RouteConfig{RouteConfig: route},
+		StatPrefix: t.Name,
+		CodecType:  hcmv3.HttpConnectionManager_AUTO,
+		RouteSpecifier: &hcmv3.HttpConnectionManager_Rds{Rds: &hcmv3.Rds{
+			RouteConfigName: t.Name,
+			ConfigSource: &corev3.ConfigSource{
+				ResourceApiVersion:    corev3.ApiVersion_V3,
+				ConfigSourceSpecifier: &corev3.ConfigSource_Ads{Ads: &corev3.AggregatedConfigSource{}},
+			},
+		}},
 		HttpFilters: append(limiters, &hcmv3.HttpFilter{
 			Name:       "envoy.filters.http.router",
 			ConfigType: &hcmv3.HttpFilter_TypedConfig{TypedConfig: router},
@@ -170,7 +203,7 @@ func (t TargetSpec) listener() (*listenerv3.Listener, error) {
 		}
 		hcm.AccessLog = []*accesslogv3.AccessLog{al}
 	}
-	hcmAny, err := anypb.New(hcm)
+	hcmAny, err := toAny(hcm)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +220,7 @@ func (t TargetSpec) listener() (*listenerv3.Listener, error) {
 }
 
 func accessLog(logName string) (*accesslogv3.AccessLog, error) {
-	cfg, err := anypb.New(&grpcalsv3.HttpGrpcAccessLogConfig{
+	cfg, err := toAny(&grpcalsv3.HttpGrpcAccessLogConfig{
 		CommonConfig: &grpcalsv3.CommonGrpcAccessLogConfig{
 			LogName:             logName,
 			GrpcService:         controlGRPC(),
@@ -226,7 +259,7 @@ func (t TargetSpec) cluster() (*clusterv3.Cluster, error) {
 			MaxConnections: wrapperspb.UInt32(t.PerHostLimit),
 		}}
 	}
-	proto1, err := anypb.New(&upstreamhttpv3.HttpProtocolOptions{
+	proto1, err := toAny(&upstreamhttpv3.HttpProtocolOptions{
 		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{IdleTimeout: durationpb.New(upstreamIdleTimeout)},
 		UpstreamProtocolOptions: &upstreamhttpv3.HttpProtocolOptions_ExplicitHttpConfig_{
 			ExplicitHttpConfig: &upstreamhttpv3.HttpProtocolOptions_ExplicitHttpConfig{
@@ -320,7 +353,7 @@ func (s *TLSSpec) transportSocket() (*corev3.TransportSocket, error) {
 		}
 		common.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContext{ValidationContext: vc}
 	}
-	cfg, err := anypb.New(&tlsv3.UpstreamTlsContext{Sni: s.ServerName, CommonTlsContext: common})
+	cfg, err := toAny(&tlsv3.UpstreamTlsContext{Sni: s.ServerName, CommonTlsContext: common})
 	if err != nil {
 		return nil, err
 	}
@@ -360,4 +393,17 @@ func socketAddress(ip string, port uint32) *corev3.Address {
 		Address:       ip,
 		PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: port},
 	}}}
+}
+
+// toAny packs a message, with its bytes the same every time. anypb.New
+// writes a map's entries in whatever order Go's map hands them over, so the
+// same listener would come out as different bytes from one render to the
+// next: the snapshot would look changed when it had not, and Envoy, which
+// compares what it is sent with what it has, would replace the listener.
+func toAny(m proto.Message) (*anypb.Any, error) {
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return &anypb.Any{TypeUrl: "type.googleapis.com/" + string(m.ProtoReflect().Descriptor().FullName()), Value: b}, nil
 }

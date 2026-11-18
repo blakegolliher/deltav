@@ -60,6 +60,10 @@ type Sample struct {
 	BytesIn  uint64        // request body bytes
 	BytesOut uint64        // response body bytes
 	Overflow bool          // refused by a circuit breaker (response flag UO)
+	// Refused marks a request a rate rule refused inside Envoy. It never
+	// reached the target, and is counted apart from the target's requests:
+	// in none of the counts by status, bytes or latency.
+	Refused bool
 }
 
 // EndpointKey names one endpoint of one target.
@@ -79,9 +83,16 @@ type Counts struct {
 	BytesIn     uint64
 	BytesOut    uint64
 	DurationSum time.Duration
+	// Refused counts requests a rate rule refused. They are in no other
+	// count here.
+	Refused uint64
 }
 
 func (c *Counts) add(s *Sample) {
+	if s.Refused {
+		c.Refused++
+		return
+	}
 	c.Requests++
 	if class := s.Status / 100; class >= 1 && class <= 5 {
 		c.Class[class]++
@@ -113,6 +124,7 @@ func (c *Counts) merge(o *Counts) {
 	c.BytesIn += o.BytesIn
 	c.BytesOut += o.BytesOut
 	c.DurationSum += o.DurationSum
+	c.Refused += o.Refused
 }
 
 // slot is one time slice of a series.
@@ -192,6 +204,14 @@ func newSeries() *series {
 }
 
 func (s *series) add(now time.Time, sample *Sample) {
+	s.last = now
+	if sample.Refused {
+		// Not a request the target saw: no latency to speak of.
+		s.fine.at(now).Counts.add(sample)
+		s.coarse.at(now).Counts.add(sample)
+		s.total.Counts.add(sample)
+		return
+	}
 	b := bucketOf(sample.Duration)
 	for _, sl := range []*slot{s.fine.at(now), s.coarse.at(now)} {
 		sl.Counts.add(sample)
@@ -199,7 +219,6 @@ func (s *series) add(now time.Time, sample *Sample) {
 	}
 	s.total.Counts.add(sample)
 	s.total.Hist[b]++
-	s.last = now
 }
 
 // window adds the slots that make up window w into out.
@@ -244,11 +263,15 @@ type Summary struct {
 	Rate403       float64      `json:"rate_403"`
 	Rate503       float64      `json:"rate_503"`
 	Overflow      uint64       `json:"overflow"` // refused by a circuit breaker
-	BytesIn       uint64       `json:"bytes_in"`
-	BytesOut      uint64       `json:"bytes_out"`
-	BytesInRate   float64      `json:"bytes_in_rate"`
-	BytesOutRate  float64      `json:"bytes_out_rate"`
-	LatencyMS     Latency      `json:"latency_ms"`
+	// Refused and RefusedRate count requests a rate rule refused before
+	// they reached the target. They are in none of the other numbers.
+	Refused      uint64  `json:"refused"`
+	RefusedRate  float64 `json:"refused_rate"`
+	BytesIn      uint64  `json:"bytes_in"`
+	BytesOut     uint64  `json:"bytes_out"`
+	BytesInRate  float64 `json:"bytes_in_rate"`
+	BytesOutRate float64 `json:"bytes_out_rate"`
+	LatencyMS    Latency `json:"latency_ms"`
 }
 
 func summarize(sl *slot, span time.Duration) Summary {
@@ -261,6 +284,7 @@ func summarize(sl *slot, span time.Duration) Summary {
 			S403: sl.S403, S503: sl.S503, None: sl.Class[0] + sl.Class[1],
 		},
 		Overflow: sl.Overflow,
+		Refused:  sl.Refused,
 		BytesIn:  sl.BytesIn,
 		BytesOut: sl.BytesOut,
 		LatencyMS: Latency{
@@ -273,6 +297,7 @@ func summarize(sl *slot, span time.Duration) Summary {
 		out.RequestRate = float64(sl.Requests) / secs
 		out.Rate403 = float64(sl.S403) / secs
 		out.Rate503 = float64(sl.S503) / secs
+		out.RefusedRate = float64(sl.Refused) / secs
 		out.BytesInRate = float64(sl.BytesIn) / secs
 		out.BytesOutRate = float64(sl.BytesOut) / secs
 	}

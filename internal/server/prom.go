@@ -73,6 +73,9 @@ var (
 	descRuleRequests = prometheus.NewDesc("deltav_rate_limit_requests_total",
 		"Requests a rate rule matched, as Envoys report them every few seconds: let through (allowed) or refused (denied).",
 		[]string{"rule", "result"}, nil)
+	descRefused = prometheus.NewDesc("deltav_target_refused_total",
+		"Requests a rate rule refused inside Envoy before they reached the target. They are in none of the deltav_endpoint_* series.",
+		[]string{"target"}, nil)
 	descRuleKeys = prometheus.NewDesc("deltav_rate_limit_keys",
 		"What a rate rule is counting separately now: access keys, buckets or prefixes with requests in the last reports.",
 		[]string{"rule"}, nil)
@@ -107,7 +110,12 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 		gauge(descTargets, float64(len(t.Endpoints)), t.Name)
 	}
 
+	refused := map[string]uint64{}
+	for _, t := range targets {
+		refused[t.Name] = 0
+	}
 	for _, e := range c.s.agg.EndpointTotals() {
+		refused[e.Key.Target] += e.Totals.Refused
 		l := []string{e.Key.Target, e.Key.Endpoint, cnodes[e.Key]}
 		with := func(extra string) []string { return append(l[:3:3], extra) }
 		t := &e.Totals
@@ -126,6 +134,10 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 		counter(descLoadIssued, e.Load.Issued, l...)
 		counter(descLoadDone, e.Load.Success, with("success")...)
 		counter(descLoadDone, e.Load.Errors, with("error")...)
+	}
+
+	for target, n := range refused {
+		counter(descRefused, n, target)
 	}
 
 	for _, t := range c.s.store.Targets() {

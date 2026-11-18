@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"deltav/internal/metrics"
+	"deltav/internal/ratelimit"
 )
 
 // DefaultLoadReportInterval is how often each Envoy reports load. A report
@@ -33,7 +35,9 @@ type Server struct {
 	accesslogv3.UnimplementedAccessLogServiceServer
 	loadstatsv3.UnimplementedLoadReportingServiceServer
 
-	agg      *metrics.Aggregator
+	agg *metrics.Aggregator
+	// refused, if set, is told of every request a rate rule refused.
+	refused  func([]ratelimit.Refusal)
 	log      *slog.Logger
 	interval time.Duration
 	ignore   map[string]bool // cluster names that are not targets
@@ -55,6 +59,10 @@ func New(agg *metrics.Aggregator, log *slog.Logger, loadReportInterval time.Dura
 	}
 	return s
 }
+
+// OnRefusals sets who is told of the requests rate rules refuse, a batch at
+// a time as Envoys log them. Call it before the services take streams.
+func (s *Server) OnRefusals(f func([]ratelimit.Refusal)) { s.refused = f }
 
 // Register adds both services to a gRPC server.
 func (s *Server) Register(g *grpc.Server) {
@@ -89,13 +97,22 @@ func (s *Server) StreamAccessLogs(stream accesslogv3.AccessLogService_StreamAcce
 			continue
 		}
 		batch := make([]metrics.Sample, 0, len(entries))
+		var refused []ratelimit.Refusal
 		for _, e := range entries {
-			if sample, ok := sampleFrom(e, logName); ok {
-				batch = append(batch, sample)
+			sample, ok := sampleFrom(e, logName)
+			if !ok {
+				continue
+			}
+			batch = append(batch, sample)
+			if sample.Refused && s.refused != nil {
+				refused = append(refused, refusalFrom(e, node, sample))
 			}
 		}
 		s.agg.Record(node, batch)
 		s.entries.Add(uint64(len(batch)))
+		if len(refused) > 0 {
+			s.refused(refused)
+		}
 	}
 }
 
@@ -119,6 +136,11 @@ func sampleFrom(e *accesslogdatav3.HTTPAccessLogEntry, logName string) (metrics.
 	if code := e.GetResponse().GetResponseCode(); code != nil {
 		s.Status = int(code.GetValue())
 	}
+	// A request a rate rule refused was answered by Envoy and never went to
+	// the target. A blocked rule's refusal is the script's, which leaves
+	// the rule's name; one over a limit is the quota filter's, which Envoy
+	// marks in the response's details.
+	s.Refused = note(e, ratelimit.MetadataRefusedBy) != "" || e.GetResponse().GetResponseCodeDetails() == ratelimit.RefusedDetails
 	// duration runs to the end of the stream; older Envoys only set the
 	// time to the last byte sent downstream.
 	if d := c.GetDuration(); d != nil {
@@ -127,6 +149,30 @@ func sampleFrom(e *accesslogdatav3.HTTPAccessLogEntry, logName string) (metrics.
 		s.Duration = d.AsDuration()
 	}
 	return s, true
+}
+
+// note returns what the rate-limit script noted about a request under key.
+func note(e *accesslogdatav3.HTTPAccessLogEntry, key string) string {
+	return e.GetCommonProperties().GetMetadata().GetFilterMetadata()[ratelimit.MetadataNamespace].GetFields()[key].GetStringValue()
+}
+
+func refusalFrom(e *accesslogdatav3.HTTPAccessLogEntry, node string, s metrics.Sample) ratelimit.Refusal {
+	r := ratelimit.Refusal{
+		Client: node, Target: s.Target, Status: s.Status,
+		Operation: note(e, ratelimit.MetadataOperation), AccessKey: note(e, ratelimit.MetadataAccessKey), Bucket: note(e, ratelimit.MetadataBucket),
+	}
+	if t := e.GetCommonProperties().GetStartTime(); t != nil {
+		r.At = t.AsTime()
+	}
+	if by := note(e, ratelimit.MetadataRefusedBy); by != "" {
+		r.Blocked, r.Rules = true, []string{by}
+	} else if rules := note(e, ratelimit.MetadataRules); rules != "" {
+		r.Rules = strings.Split(rules, ",")
+	}
+	if r.Rules == nil {
+		r.Rules = []string{}
+	}
+	return r
 }
 
 func hostPort(a *corev3.Address) string {

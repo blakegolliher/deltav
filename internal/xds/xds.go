@@ -89,7 +89,7 @@ func (s *Server) Update(ctx context.Context, targets []TargetSpec) (version stri
 	targets = append([]TargetSpec(nil), targets...)
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
 
-	var clusters, endpoints, listeners []types.Resource
+	var clusters, endpoints, listeners, routes []types.Resource
 	names, ports := map[string]bool{}, map[uint32]string{}
 	h := sha256.New()
 	for _, t := range targets {
@@ -101,11 +101,11 @@ func (s *Server) Update(ctx context.Context, targets []TargetSpec) (version stri
 		}
 		names[t.Name], ports[t.ListenPort] = true, t.Name
 
-		l, c, e, err := t.Resources()
+		r, err := t.Resources()
 		if err != nil {
 			return "", false, err
 		}
-		for _, m := range []proto.Message{c, e, l} {
+		for _, m := range []proto.Message{r.Cluster, r.Endpoints, r.Listener, r.Route} {
 			b, err := proto.MarshalOptions{Deterministic: true}.Marshal(m)
 			if err != nil {
 				return "", false, err
@@ -113,7 +113,8 @@ func (s *Server) Update(ctx context.Context, targets []TargetSpec) (version stri
 			fmt.Fprintf(h, "%d:", len(b))
 			h.Write(b)
 		}
-		clusters, endpoints, listeners = append(clusters, c), append(endpoints, e), append(listeners, l)
+		clusters, endpoints = append(clusters, r.Cluster), append(endpoints, r.Endpoints)
+		listeners, routes = append(listeners, r.Listener), append(routes, r.Route)
 	}
 	var digest [sha256.Size]byte
 	h.Sum(digest[:0])
@@ -127,7 +128,7 @@ func (s *Server) Update(ctx context.Context, targets []TargetSpec) (version stri
 	// string is never reused for different content.
 	s.seq++
 	next := fmt.Sprintf("%s.%d", s.epoch, s.seq)
-	if err := s.publish(ctx, next, clusters, endpoints, listeners); err != nil {
+	if err := s.publish(ctx, next, clusters, endpoints, listeners, routes); err != nil {
 		return "", false, err
 	}
 	s.version, s.digest, s.targets = next, digest, targets
@@ -135,18 +136,25 @@ func (s *Server) Update(ctx context.Context, targets []TargetSpec) (version stri
 }
 
 // publish moves the fleet to a new version one resource type at a time:
-// clusters, then endpoints, then listeners. Each step changes only that
-// type's version, so the cache pushes only that type, and a stream that is
-// waiting on all three carries the pushes in this order. Envoy therefore
-// knows a cluster before the listener that routes to it, and a cluster that
-// re-warms after a change finds its endpoints right behind it.
+// clusters, then endpoints, then listeners, then routes. Each step changes
+// only that type's version, so the cache pushes only that type, and a
+// stream that is waiting on all four carries the pushes in this order.
+// Envoy therefore knows a cluster before the listener and routes that lead
+// to it, and a cluster that re-warms after a change finds its endpoints
+// right behind it. A new listener waits for its routes before it takes
+// connections, and asks for them by name as soon as it arrives.
 //
 // The order is best effort: a stream whose ACK of the previous push is
 // still in flight has no watch open for that type, and is answered when the
 // ACK arrives, possibly after the later types. Both effects of that are
-// harmless: listeners do not validate clusters (see listener), and a
-// re-warming cluster falls back to Envoy's cached endpoints.
-func (s *Server) publish(ctx context.Context, version string, clusters, endpoints, listeners []types.Resource) error {
+// harmless: routes do not validate clusters (see route), and a re-warming
+// cluster falls back to Envoy's cached endpoints.
+//
+// Every type gets the new version, changed or not. Envoy compares what it
+// is sent with what it has: an identical listener is left alone, which is
+// what lets a rule change, carried in the routes, leave every connection
+// open.
+func (s *Server) publish(ctx context.Context, version string, clusters, endpoints, listeners, routes []types.Resource) error {
 	for _, step := range []struct {
 		typeURL resource.Type
 		items   []types.Resource
@@ -154,6 +162,7 @@ func (s *Server) publish(ctx context.Context, version string, clusters, endpoint
 		{resource.ClusterType, clusters},
 		{resource.EndpointType, endpoints},
 		{resource.ListenerType, listeners},
+		{resource.RouteType, routes},
 	} {
 		s.snapshot.Resources[cache.GetResponseType(step.typeURL)] = cache.NewResources(version, step.items)
 		snap := s.snapshot // the cache keeps the pointer; give it its own copy

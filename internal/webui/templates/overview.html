@@ -66,6 +66,7 @@
     {{else}}
     <p class="tile-note">{{badge "good" "Nothing refused"}} by {{.RateRules.Rules}} {{if eq .RateRules.Rules 1}}rule{{else}}rules{{end}}</p>
     {{end}}
+    {{if .RateRules.NotHolding}}<p class="tile-note">{{badge "warn" "Burst not kept"}} {{join .RateRules.NotHolding ", "}}: see <a href="/controls">Controls</a></p>{{end}}
   </div>
 </section>
 
@@ -99,6 +100,7 @@
             {{if .Status.Problem}}<span class="sub">{{badge "crit" "Not resolved"}} {{.Status.Problem}}</span>
             {{else if .Status.Held}}<span class="sub">{{badge "warn" "Held"}} serving the last known list</span>
             {{else if .Status.Drained}}<span class="sub">{{badge "paused" "Drained"}} {{count .Status.Drained}} withheld</span>{{end}}
+            {{if .Status.Unusable}}<span class="sub">{{badge "warn" "Left out"}} {{count .Status.Unusable}}: VAST gave no usable address</span>{{end}}
           {{else}}{{count .Endpoints}}{{end}}
         </td>
         {{template "stat-cells" .}}

@@ -73,6 +73,32 @@ func TestRuleCommands(t *testing.T) {
 	if got := mustRun(t, "rule", "list", "--api", api); strings.Contains(got, "listings") || !strings.Contains(got, "uploads") {
 		t.Errorf("after removing: %s", got)
 	}
+	// The record of what rules refused. A daemon no Envoy has spoken to
+	// has none; real ones are in the tests against Envoy.
+	if got := mustRun(t, "rule", "refusals", "--api", api); !strings.HasSuffix(got, "\nNo rule has refused a request since the daemon started.\n") || strings.Count(got, "\n") != 2 {
+		t.Errorf("rule refusals with none: %q", got)
+	}
+	if got := mustRun(t, "rule", "refusals", "--api", api, "--json"); !strings.Contains(got, `"refusals": []`) {
+		t.Errorf("rule refusals --json: %s", got)
+	}
+	if _, err := run(t, "dv", "rule", "refusals", "--api", api, "--limit", "0"); err == nil || !strings.Contains(err.Error(), "--limit") {
+		t.Errorf("rule refusals --limit 0: %v", err)
+	}
+	// One request can be limited by only so many rules; with more than
+	// that, the list says which ones count.
+	note := "One request can be limited by at most 4 rules."
+	if got := mustRun(t, "rule", "list", "--api", api); strings.Contains(got, note) {
+		t.Errorf("with two rules, one of them blocked:\n%s", got)
+	}
+	for _, name := range []string{"a", "b", "c", "d"} {
+		mustRun(t, "rule", "set", name, "--api", api, "--per-second", "5", "--per", "total")
+	}
+	if got := mustRun(t, "rule", "list", "--api", api); !strings.Contains(got, "\n\n"+note+" One that matches more is limited by the first 4 in this order; blocked rules always apply.\n") {
+		t.Errorf("with five limits:\n%s", got)
+	}
+	if got := mustRun(t, "rule", "set", "--help"); !strings.Contains(got, "at most 4 rules") || !strings.Contains(got, "before VAST checks its") || !strings.Contains(got, "blocked rules go on refusing") {
+		t.Errorf("rule set --help does not say how rules behave:\n%s", got)
+	}
 	if got := mustRun(t, "rule", "operations"); !strings.Contains(got, "\nPutObject\n") || !strings.Contains(got, "\nListObjectsV2\n") || strings.Count(got, "\n") < 100 {
 		t.Errorf("rule operations: %d lines", strings.Count(got, "\n"))
 	}

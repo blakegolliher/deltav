@@ -235,6 +235,13 @@ func (m *Model) overviewView() ([]string, int) {
 		}
 		out = append(out, "")
 	}
+	if nh := m.overview.RateRules.NotHolding; len(nh) > 0 {
+		line := fmt.Sprintf("Rate rules not keeping their burst (%s): more Envoys share a count than the burst allows. See Controls.", strings.Join(nh, ", "))
+		for _, l := range wrap(line, m.width) {
+			out = append(out, styleWarn.Render(l))
+		}
+		out = append(out, "")
+	}
 	if len(m.overview.Targets) == 0 {
 		return append(out, "No targets yet.", "",
 			styleDim.Render("Attach a VAST cluster and add a target:"),
@@ -490,6 +497,9 @@ func (m *Model) controlsView() ([]string, int) {
 					if st.Drained > 0 {
 						status += fmt.Sprintf(", %d withheld by drain", st.Drained)
 					}
+					if st.Unusable > 0 {
+						status += fmt.Sprintf(", %d with no usable address", st.Unusable)
+					}
 					status = styleWarn.Render(status)
 				default:
 					status = styleGood.Render(fmt.Sprintf("%d of %d VIPs on healthy CNodes", st.Healthy, st.VIPs))
@@ -562,6 +572,9 @@ func (m *Model) controlsView() ([]string, int) {
 		out = append(out, table(cols, rows, -1, m.width)...)
 		for _, r := range m.rules {
 			out = append(out, dim(r.Name+": "+r.Sentence, min(m.width, 110))...)
+			if note := r.Rule.HoldNote(r.Status); note != "" {
+				caveats = append(caveats, r.Name+": "+note)
+			}
 		}
 	}
 	if len(caveats) > 0 {

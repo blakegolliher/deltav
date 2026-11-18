@@ -190,6 +190,10 @@ type rateRulesOverview struct {
 	AllowedRate float64  `json:"allowed_rate"`
 	DeniedRate  float64  `json:"denied_rate"`
 	Refusing    []string `json:"refusing"` // rules refusing requests now
+	// NotHolding names the rules whose burst is not being kept, because
+	// more Envoys share one of their counts than the burst (see the
+	// rules' own "holds").
+	NotHolding []string `json:"not_holding"`
 }
 
 type overviewResponse struct {
@@ -227,7 +231,7 @@ func (s *Server) overview(win metrics.Window) overviewResponse {
 		}
 		resp.Targets = append(resp.Targets, o)
 	}
-	resp.RateRules.Refusing = []string{}
+	resp.RateRules.Refusing, resp.RateRules.NotHolding = []string{}, []string{}
 	status, _ := s.quota.Status()
 	for _, r := range s.store.Rules() {
 		st := status[r.Name]
@@ -236,6 +240,9 @@ func (s *Server) overview(win metrics.Window) overviewResponse {
 		resp.RateRules.DeniedRate += st.DeniedRate
 		if st.DeniedRate > 0 {
 			resp.RateRules.Refusing = append(resp.RateRules.Refusing, r.Name)
+		}
+		if !r.Holds(st) {
+			resp.RateRules.NotHolding = append(resp.RateRules.NotHolding, r.Name)
 		}
 	}
 	return resp

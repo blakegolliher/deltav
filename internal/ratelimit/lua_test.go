@@ -1,7 +1,6 @@
 package ratelimit
 
 import (
-	"sort"
 	"strings"
 	"testing"
 
@@ -11,16 +10,30 @@ import (
 // The script is run here by a Lua 5.1 interpreter written in Go. Inside
 // Envoy it is run by LuaJIT; the integration tests cover that.
 
-// harness stands in for Envoy's request handle: headers are a plain table.
+// harness stands in for Envoy's request handle: headers are a plain table,
+// and what the script says about the request is left in it too, under
+// names no header has: "__md.<key>" for metadata, "__status" and "__body"
+// for a response it sends itself.
 const harness = `
 function __run(headers)
   local hd = {}
   function hd:get(k) return headers[k] end
   function hd:replace(k, v) headers[k] = v end
   function hd:remove(k) headers[k] = nil end
+  local md = {}
+  function md:set(ns, k, v) headers["__md." .. k] = v; headers["__md_ns"] = ns end
+  local info = {}
+  function info:dynamicMetadata() return md end
   local handle = {}
   function handle:headers() return hd end
+  function handle:streamInfo() return info end
   function handle:logErr(m) headers["__error"] = m end
+  function handle:respond(h, body)
+    headers["__status"] = h[":status"]
+    headers["__body"] = body
+    headers["__content-type"] = h["content-type"]
+    headers["__retry-after"] = h["retry-after"]
+  end
   envoy_on_request(handle)
   return headers
 end
@@ -201,87 +214,185 @@ func TestIdentity(t *testing.T) {
 	}
 }
 
+// slots says what the script did with a request: the rule and count name
+// in each slot, in order, as "rule=key" (with "!429" if a refusal is to be
+// a 429), or "REFUSED by rule (status)" if it answered the request itself.
+func slots(out map[string]string) string {
+	if st := out["__status"]; st != "" {
+		return "REFUSED by " + out["__md."+MetadataRefusedBy] + " (" + st + ")"
+	}
+	var got []string
+	for j := 1; j <= Slots+1; j++ {
+		rule, key := out[SlotRuleHeader(j)], out[SlotKeyHeader(j)]
+		if rule == "" && key == "" {
+			continue
+		}
+		s := rule + "=" + key
+		if st := out[SlotStatusHeader(j)]; st != "" {
+			s += "!" + st
+		}
+		got = append(got, s)
+	}
+	return strings.Join(got, " ")
+}
+
 func TestRuleMatching(t *testing.T) {
 	const ak1, ak2 = "AKIAEXAMPLE1", "AKIAEXAMPLE2"
 	auth := func(ak string) map[string]string {
 		return map[string]string{"authorization": "AWS4-HMAC-SHA256 Credential=" + ak + "/20261118/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc"}
 	}
 	L := load(t,
-		// 1: tollbooth's own example.
-		Rule{Name: "tenant-a-uploads", Operation: []string{"PutObject", "UploadPart", "CompleteMultipartUpload"}, AccessKey: []string{ak1, ak2},
+		// tollbooth's own example.
+		Rule{Name: "uploads", Operation: []string{"PutObject", "UploadPart", "CompleteMultipartUpload"}, AccessKey: []string{ak1, ak2},
 			Bucket: []string{"training-data", "checkpoints"}, Prefix: []string{"ckpt/", "logs/"}, LimitPerSecond: 2000, Burst: 4000, Per: []string{PerAccessKey, PerBucket}},
-		// 2: a family, counted in total.
-		Rule{Name: "all-listings", Operation: []string{"List*"}, LimitPerMinute: 600, Per: []string{PerTotal}},
-		// 3: every operation, per access key and per client host.
+		// A family, counted in total.
+		Rule{Name: "listings", Operation: []string{"List*"}, LimitPerMinute: 600, Per: []string{PerTotal}, Respond: 429},
+		// Every operation, per access key and per client host.
 		Rule{Name: "per-key", LimitPerSecond: 100, Per: []string{PerAccessKey, PerClient}},
-		// 4: counted per prefix; the longest matching prefix is the one.
+		// Counted per prefix; the longest matching prefix is the one.
 		Rule{Name: "by-prefix", Bucket: []string{"data"}, Prefix: []string{"a/", "a/b/", "odd, one\"]]\n--"[:9]}, LimitPerSecond: 5, Per: []string{PerPrefix}},
-		// 5: blocked.
+		// Blocked.
 		Rule{Name: "no-deletes", Operation: []string{"DeleteObject", "DeleteObjects"}, Bucket: []string{"archive"}, Blocked: true},
 	)
 	marks := func(method, path string, headers map[string]string) string {
 		t.Helper()
-		out := run(t, L, method, path, headers)
-		var got []string
-		for k, v := range out {
-			if n, ok := strings.CutPrefix(k, "x-deltav-rl-"); ok {
-				got = append(got, n+"="+v)
-			}
-		}
-		sort.Strings(got)
-		return strings.Join(got, " ")
+		return slots(run(t, L, method, path, headers))
 	}
 	for _, c := range []struct {
 		what, method, path string
 		headers            map[string]string
 		want               string
 	}{
-		{"an upload that passes every filter of rule 1", "PUT", "/checkpoints/ckpt/step-9.pt", auth(ak1), "1=" + ak1 + ",checkpoints 3=" + ak1},
-		{"another key and bucket: its own count", "PUT", "/training-data/logs/x", auth(ak2), "1=" + ak2 + ",training-data 3=" + ak2},
-		{"an access key the rule does not list", "PUT", "/checkpoints/ckpt/x", auth("AKIAOTHER"), "3=AKIAOTHER"},
-		{"a bucket the rule does not list", "PUT", "/scratch/ckpt/x", auth(ak1), "3=" + ak1},
-		{"a key under none of the prefixes", "PUT", "/checkpoints/tmp/x", auth(ak1), "3=" + ak1},
-		{"an operation the rule does not list", "GET", "/checkpoints/ckpt/x", auth(ak1), "3=" + ak1},
-		{"a part of a multipart upload", "PUT", "/checkpoints/ckpt/x?partNumber=1&uploadId=u", auth(ak1), "1=" + ak1 + ",checkpoints 3=" + ak1},
-		{"a listing: the family, in total", "GET", "/checkpoints?list-type=2&prefix=ckpt/", auth(ak1), "2=* 3=" + ak1},
-		{"ListParts is in the family too", "GET", "/checkpoints/ckpt/x?uploadId=u", auth(ak1), "2=* 3=" + ak1},
-		{"anonymous requests are counted together", "GET", "/public/x", nil, "3=-"},
-		{"the longest prefix is the one counted", "GET", "/data/a/b/c", auth(ak1), "3=" + ak1 + " 4=a/b/"},
-		{"the shorter prefix", "GET", "/data/a/x", auth(ak1), "3=" + ak1 + " 4=a/"},
-		{"a listing is matched by its prefix parameter", "GET", "/data?list-type=2&prefix=a/b/c", auth(ak1), "2=* 3=" + ak1 + " 4=a/b/"},
-		{"a listing with a shorter prefix than the rule's does not match it", "GET", "/data?list-type=2&prefix=a", auth(ak1), "2=* 3=" + ak1},
-		{"a prefix with marks in it is counted under its encoding", "GET", "/data/odd,%20one%22/x", auth(ak1), "3=" + ak1 + " 4=odd%2C%20one%22"},
-		{"blocked", "DELETE", "/archive/x", auth(ak1), "3=" + ak1 + " 5=*"},
-		{"blocked, the batch form", "POST", "/archive?delete", auth(ak1), "3=" + ak1 + " 5=*"},
-		{"not blocked elsewhere", "DELETE", "/data/x", auth(ak1), "3=" + ak1},
+		{"an upload that passes every filter of the first rule", "PUT", "/checkpoints/ckpt/step-9.pt", auth(ak1), "uploads=" + ak1 + ",checkpoints per-key=" + ak1},
+		{"another key and bucket: its own count", "PUT", "/training-data/logs/x", auth(ak2), "uploads=" + ak2 + ",training-data per-key=" + ak2},
+		{"an access key the rule does not list", "PUT", "/checkpoints/ckpt/x", auth("AKIAOTHER"), "per-key=AKIAOTHER"},
+		{"a bucket the rule does not list", "PUT", "/scratch/ckpt/x", auth(ak1), "per-key=" + ak1},
+		{"a key under none of the prefixes", "PUT", "/checkpoints/tmp/x", auth(ak1), "per-key=" + ak1},
+		{"an operation the rule does not list", "GET", "/checkpoints/ckpt/x", auth(ak1), "per-key=" + ak1},
+		{"a part of a multipart upload", "PUT", "/checkpoints/ckpt/x?partNumber=1&uploadId=u", auth(ak1), "uploads=" + ak1 + ",checkpoints per-key=" + ak1},
+		{"a listing: the family, in total, refused with 429", "GET", "/checkpoints?list-type=2&prefix=ckpt/", auth(ak1), "listings=*!429 per-key=" + ak1},
+		{"ListParts is in the family too", "GET", "/checkpoints/ckpt/x?uploadId=u", auth(ak1), "listings=*!429 per-key=" + ak1},
+		{"anonymous requests are counted together", "GET", "/public/x", nil, "per-key=-"},
+		{"the longest prefix is the one counted", "GET", "/data/a/b/c", auth(ak1), "per-key=" + ak1 + " by-prefix=a/b/"},
+		{"the shorter prefix", "GET", "/data/a/x", auth(ak1), "per-key=" + ak1 + " by-prefix=a/"},
+		{"a listing is matched by its prefix parameter", "GET", "/data?list-type=2&prefix=a/b/c", auth(ak1), "listings=*!429 per-key=" + ak1 + " by-prefix=a/b/"},
+		{"a listing with a shorter prefix than the rule's does not match it", "GET", "/data?list-type=2&prefix=a", auth(ak1), "listings=*!429 per-key=" + ak1},
+		{"a prefix with marks in it is counted under its encoding", "GET", "/data/odd,%20one%22/x", auth(ak1), "per-key=" + ak1 + " by-prefix=odd%2C%20one%22"},
+		{"blocked: the script answers", "DELETE", "/archive/x", auth(ak1), "REFUSED by no-deletes (503)"},
+		{"blocked, the batch form", "POST", "/archive?delete", auth(ak1), "REFUSED by no-deletes (503)"},
+		{"not blocked elsewhere", "DELETE", "/data/x", auth(ak1), "per-key=" + ak1},
+		// The bucket is what a server would take it to be, however the
+		// client spells it.
+		{"blocked, the bucket percent-encoded", "DELETE", "/arch%69ve/x", auth(ak1), "REFUSED by no-deletes (503)"},
+		{"blocked, the whole bucket percent-encoded", "DELETE", "/%61%72%63%68%69%76%65/x", auth(ak1), "REFUSED by no-deletes (503)"},
+		{"blocked, behind a second slash", "DELETE", "//archive/x", auth(ak1), "REFUSED by no-deletes (503)"},
+		{"an encoded bucket is the same bucket to a filter", "PUT", "/check%70oints/ckpt/x", auth(ak1), "uploads=" + ak1 + ",checkpoints per-key=" + ak1},
+		{"an encoded slash is not a separator", "DELETE", "/archive%2Fx", auth(ak1), "per-key=" + ak1},
 	} {
 		if got := marks(c.method, c.path, c.headers); got != c.want {
-			t.Errorf("%s (%s %s): marked %q, want %q", c.what, c.method, c.path, got, c.want)
+			t.Errorf("%s (%s %s): %q, want %q", c.what, c.method, c.path, got, c.want)
 		}
 	}
 
+	// What a refusal by the script looks like to the client: S3's own
+	// throttling answer.
+	out := run(t, L, "DELETE", "/archive/x", auth(ak1))
+	if out["__status"] != "503" || out["__content-type"] != "application/xml" || out["__retry-after"] != "1" ||
+		!strings.Contains(out["__body"], "<Code>SlowDown</Code>") || out["__body"] != RefusalBody(503) {
+		t.Errorf("a blocked request was answered %v", out)
+	}
+	// And what the daemon is told of a request that a rule counted or
+	// refused, by way of the access log.
+	if out["__md_ns"] != MetadataNamespace || out["__md."+MetadataRefusedBy] != "no-deletes" || out["__md."+MetadataOperation] != "DeleteObject" ||
+		out["__md."+MetadataAccessKey] != ak1 || out["__md."+MetadataBucket] != "archive" {
+		t.Errorf("metadata of a blocked request: %v", out)
+	}
+	out = run(t, L, "GET", "/data?list-type=2&prefix=a/b/c", auth(ak1))
+	if out["__md."+MetadataRules] != "listings,per-key,by-prefix" || out["__md."+MetadataOperation] != "ListObjectsV2" || out["__md."+MetadataRefusedBy] != "" {
+		t.Errorf("metadata of a counted request: %v", out)
+	}
+
 	// A client cannot mark itself: what it sends under the script's header
-	// names is dropped, whether or not the rule matches.
+	// names is dropped, whether or not a rule matches.
 	h := auth("AKIAOTHER")
-	h["x-deltav-rl-1"], h["x-deltav-rl-3"], h["x-deltav-rl-5"] = "someone-else", "someone-else", "*"
-	if got := marks("PUT", "/checkpoints/ckpt/x", h); got != "3=AKIAOTHER" {
-		t.Errorf("with forged headers: marked %q", got)
+	h["x-deltav-rl-1"], h["x-deltav-rr-1"], h["x-deltav-rs-1"] = "someone-else", "uploads", "429"
+	h["x-deltav-rl-3"], h["x-deltav-rr-3"], h["x-deltav-rl-4"], h["x-deltav-rr-4"] = "someone-else", "per-key", "*", "listings"
+	if got := marks("PUT", "/checkpoints/ckpt/x", h); got != "per-key=AKIAOTHER" {
+		t.Errorf("with forged headers: %q", got)
 	}
 	// Nor can it grow a count's name without bound, or put anything in it
 	// but plain characters.
 	long := strings.Repeat("A", 5000)
-	got := run(t, L, "GET", "/public/x", map[string]string{"authorization": "AWS " + long + ":sig"})["x-deltav-rl-3"]
-	if len(got) != 200 {
-		t.Errorf("a 5000-byte access key is counted under %d bytes", len(got))
+	got := run(t, L, "GET", "/public/x", map[string]string{"authorization": "AWS " + long + ":sig"})
+	if len(got["x-deltav-rl-1"]) != 200 || len(got["__md."+MetadataAccessKey]) != 200 {
+		t.Errorf("a 5000-byte access key is counted under %d bytes and noted in %d", len(got["x-deltav-rl-1"]), len(got["__md."+MetadataAccessKey]))
 	}
-	got = run(t, L, "GET", "/public/x", map[string]string{"authorization": "AWS a b,c\td\x01e:sig"})["x-deltav-rl-3"]
-	if got != "a%20b%2Cc%09d%01e" {
-		t.Errorf("an access key with odd bytes is counted under %q", got)
+	got = run(t, L, "GET", "/b%C3%28%00/x", map[string]string{"authorization": "AWS a b,c\td\x01e\xff:sig"})
+	if got["x-deltav-rl-1"] != "a%20b%2Cc%09d%01e%FF" || got["__md."+MetadataAccessKey] != "a%20b%2Cc%09d%01e%FF" || got["__md."+MetadataBucket] != "b%C3%28%00" {
+		t.Errorf("odd bytes are counted under %q and noted as %q, bucket %q", got["x-deltav-rl-1"], got["__md."+MetadataAccessKey], got["__md."+MetadataBucket])
 	}
-	// Other headers are left alone.
-	out := run(t, L, "GET", "/public/x", map[string]string{"x-amz-date": "20261118T000000Z", "host": "127.0.0.1:9000"})
+	// Other headers are left alone, and a request no rule matches is not
+	// touched at all.
+	out = run(t, L, "GET", "/public/x", map[string]string{"x-amz-date": "20261118T000000Z", "host": "127.0.0.1:9000"})
 	if out["x-amz-date"] != "20261118T000000Z" || out["host"] != "127.0.0.1:9000" || out[":path"] != "/public/x" {
 		t.Errorf("the script changed a header that is not its own: %v", out)
+	}
+}
+
+// A rule that counts per bucket counts a request that names no bucket too,
+// under a name of its own: there is no request it lets through uncounted.
+func TestNothingMatchedGoesUncounted(t *testing.T) {
+	L := load(t, Rule{Name: "per-bucket", LimitPerSecond: 5, Per: []string{PerBucket}})
+	for path, want := range map[string]string{
+		"/":             "per-bucket=-",
+		"//":            "per-bucket=-",
+		"/?max-keys=1":  "per-bucket=-",
+		"/data":         "per-bucket=data",
+		"//data/k":      "per-bucket=data",
+		"///data//k":    "per-bucket=data",
+		"/d%61ta/k":     "per-bucket=data",
+		"/%2D/k":        "per-bucket=-",
+		"/%20/k":        "per-bucket=%20",
+		"/a%2Cb/k":      "per-bucket=a%2Cb",
+		"/data/k?x=//y": "per-bucket=data",
+	} {
+		if got := slots(run(t, L, "GET", path, nil)); got != want {
+			t.Errorf("GET %s: %q, want %q", path, got, want)
+		}
+	}
+	out := run(t, L, "GET", "/", nil)
+	if out[SlotKeyHeader(1)] == "" {
+		t.Error("a count's name must never be empty: the quota filter would not see the request")
+	}
+}
+
+// One request can be limited by as many rules as there are slots. Past
+// that the first ones in the order of the rules count, and the script says
+// that some did not. A blocked rule refuses wherever it comes in the order.
+func TestMoreRulesThanSlots(t *testing.T) {
+	var rules []Rule
+	for i := 1; i <= Slots+2; i++ {
+		rules = append(rules, Rule{Name: "r" + string(rune('0'+i)), LimitPerSecond: float64(i), Per: []string{PerTotal}})
+	}
+	L := load(t, rules...)
+	out := run(t, L, "GET", "/b/k", nil)
+	if got := slots(out); got != "r1=* r2=* r3=* r4=*" || Slots != 4 {
+		t.Errorf("with %d rules: %q", len(rules), got)
+	}
+	if out["__md."+MetadataSkipped] != "true" || out["__md."+MetadataRules] != "r1,r2,r3,r4" {
+		t.Errorf("metadata with more rules than slots: %v", out)
+	}
+	L = load(t, rules[:Slots]...)
+	if out := run(t, L, "GET", "/b/k", nil); out["__md."+MetadataSkipped] != "" || slots(out) != "r1=* r2=* r3=* r4=*" {
+		t.Errorf("with exactly as many rules as slots: %v", out)
+	}
+	L = load(t, append(rules, Rule{Name: "stop", Operation: []string{"GetObject"}, Blocked: true, Respond: 429})...)
+	out = run(t, L, "GET", "/b/k", nil)
+	if got := slots(out); got != "REFUSED by stop (429)" || !strings.Contains(out["__body"], "<Code>TooManyRequests</Code>") {
+		t.Errorf("a blocked rule after more rules than slots: %q, %v", got, out["__body"])
+	}
+	if got := slots(run(t, L, "PUT", "/b/k", nil)); got != "r1=* r2=* r3=* r4=*" {
+		t.Errorf("a request the blocked rule does not match: %q", got)
 	}
 }
 

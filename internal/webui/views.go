@@ -527,6 +527,7 @@ func (u *UI) funcs() template.FuncMap {
 		"deref":       func(t *time.Time) time.Time { return *t },
 		"less1":       func(n int) int { return max(n, 1) - 1 },
 		"join":        strings.Join,
+		"holdNote":    func(r apiclient.RuleStatus) string { return r.Rule.HoldNote(r.Status) },
 		"first": func(n int, keys []ratelimit.KeyStatus) []ratelimit.KeyStatus {
 			if len(keys) > n {
 				return keys[:n]

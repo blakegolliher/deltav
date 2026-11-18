@@ -16,6 +16,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -235,7 +236,13 @@ func (r *Rule) Ops() []string {
 	return out
 }
 
+// amount writes a limit's number: to three decimals, or for a number under
+// one to three figures, so that the smallest limit there can be (one an
+// hour, said per second) does not read as zero.
 func amount(v float64) string {
+	if v > 0 && v < 1 {
+		return strconv.FormatFloat(v, 'g', 3, 64)
+	}
 	return strings.TrimSuffix(strings.TrimRight(fmt.Sprintf("%.3f", v), "0"), ".")
 }
 

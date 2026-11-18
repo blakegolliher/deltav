@@ -340,6 +340,23 @@ func TestRateRulesViews(t *testing.T) {
 	}
 	m.overview.RateRules = apiclient.RateRules{Rules: 2, AllowedRate: 1840, DeniedRate: 312.4, Refusing: []string{"uploads"}}
 	expect(t, screen(m), "Rate rules are refusing 312 requests a second (uploads); 1.8k a second pass them.")
+
+	// A rule whose burst cannot be kept, because more Envoys share one of
+	// its counts than the burst, is said so in both places.
+	if strings.Contains(screen(m), "not keeping their burst") {
+		t.Error("the overview says a rule is not keeping its burst when all are")
+	}
+	m.overview.RateRules.NotHolding = []string{"hourly"}
+	expect(t, screen(m), "Rate rules not keeping their burst (hourly)")
+	hourly := RuleStatus{Limit: "20 per hour", Sentence: "At most 20 requests per hour, in total across the fleet."}
+	hourly.Name, hourly.Per, hourly.LimitPerHour, hourly.Burst = "hourly", []string{"total"}, 20, 20
+	hourly.Status.MostEnvoys, hourly.Status.Envoys, hourly.Status.Keys = 50, 50, 1
+	m.rules = []RuleStatus{uploads, hourly}
+	press(m, "4")
+	s = strings.Join(strings.Fields(screen(m)), " ")
+	if !strings.Contains(s, "hourly: Its burst of 20 is not being kept: one count is open on 50 Envoys") || strings.Contains(s, "uploads: Its burst") {
+		t.Errorf("controls with a rule that cannot keep its burst:\n%s", screen(m))
+	}
 }
 
 // What an enforced limit cannot do is said in full on the Controls view.

@@ -126,3 +126,51 @@ func TestAdaptedTableKeepsItsNotice(t *testing.T) {
 		}
 	}
 }
+
+// A limit is said as the number it is, down to the smallest there can be.
+func TestLimitInWords(t *testing.T) {
+	for _, c := range []struct {
+		rule Rule
+		want string
+	}{
+		{Rule{LimitPerSecond: 2000}, "2000 per second"},
+		{Rule{LimitPerSecond: 0.5}, "0.5 per second"},
+		{Rule{LimitPerSecond: 12.3456}, "12.346 per second"},
+		{Rule{LimitPerMinute: 600}, "600 per minute"},
+		{Rule{LimitPerHour: 1}, "1 per hour"},
+		// Valid, since the least is one an hour: not "0 per second".
+		{Rule{LimitPerSecond: 0.0004}, "0.0004 per second"},
+		{Rule{LimitPerSecond: 1.0 / 3600}, "0.000278 per second"},
+		{Rule{LimitPerMinute: 0.02}, "0.02 per minute"},
+		{Rule{Blocked: true}, "blocked"},
+	} {
+		c.rule.Name, c.rule.Per = "r", []string{PerTotal}
+		if c.rule.Blocked {
+			c.rule.Per = nil
+		}
+		if err := c.rule.Normalize(); err != nil {
+			t.Errorf("%s: %v", c.want, err)
+			continue
+		}
+		if got := c.rule.Limit(); got != c.want {
+			t.Errorf("Limit() = %q, want %q", got, c.want)
+		}
+		if s := c.rule.Sentence(); !c.rule.Blocked && (strings.Contains(s, "At most 0 ") || !strings.Contains(s, strings.Fields(c.want)[0])) {
+			t.Errorf("the sentence for %q: %s", c.want, s)
+		}
+	}
+}
+
+func TestHoldNote(t *testing.T) {
+	r := Rule{Name: "r", LimitPerHour: 20, Per: []string{PerTotal}}
+	if err := r.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if note := r.HoldNote(Status{MostEnvoys: 20}); note != "" || !r.Holds(Status{MostEnvoys: 20}) {
+		t.Errorf("as many Envoys as the burst: %q", note)
+	}
+	note := r.HoldNote(Status{MostEnvoys: 50})
+	if !strings.Contains(note, "burst of 20 is not being kept") || !strings.Contains(note, "50 Envoys") || !strings.Contains(note, "rate is kept") {
+		t.Errorf("more Envoys than the burst: %q", note)
+	}
+}

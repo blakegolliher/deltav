@@ -32,7 +32,7 @@ func TestParseStaticTargets(t *testing.T) {
 	}
 	// What was parsed must render: this is what serve hands to xDS.
 	for _, target := range got {
-		if _, _, _, err := target.Resources(); err != nil {
+		if _, err := target.Resources(); err != nil {
 			t.Errorf("%s does not render: %v", target.Name, err)
 		}
 	}

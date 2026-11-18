@@ -90,7 +90,7 @@
 <section class="card" aria-labelledby="rules-title">
   <div class="card-head">
     <h2 id="rules-title">Request-rate rules</h2>
-    <span class="hint">How many requests of which kind the fleet lets through. A rule's rate is the whole fleet's: it is divided among the Envoys that are using it, by what each asks for, and follows a change within about 5 seconds. A request must be allowed by every rule it matches.</span>
+    <span class="hint">How many requests of which kind the fleet lets through. A rule's rate is the whole fleet's: it is divided among the Envoys that are using it, by what each asks for, and follows a change within about 5 seconds. A request must be allowed by every rule it matches; at most 4 rules can limit one request, the first 4 it matches in this order, and a blocked rule always applies. A rule takes effect on the next request of every connection. A request is counted by the access key it claims, before VAST checks it.</span>
   </div>
   {{if .Rules}}
   <div class="scroll">
@@ -111,6 +111,7 @@
           <span class="name">{{.Name}}</span>
           <span class="sub wrap">{{.Sentence}}</span>
           {{if .Note}}<span class="sub wrap">Note: {{.Note}}</span>{{end}}
+          {{with holdNote .}}<span class="sub wrap">{{badge "warn" "Burst not kept"}} {{.}}</span>{{end}}
         </th>
         <td class="num">{{rate .Status.AllowedRate}}</td>
         <td class="num{{if .Status.DeniedRate}} flagged{{end}}">{{rate .Status.DeniedRate}}</td>
@@ -170,7 +171,7 @@
         </select>
       </label>
       <label class="field"><span>Note <em>(optional)</em></span><input class="input" name="note" maxlength="200" value="{{.NewRule.Note}}" autocomplete="off"></label>
-      <div class="form-end"><button class="btn btn-main">Set rule</button><span class="hint">If the daemon cannot be reached for more than ten minutes, Envoys stop applying rate rules until it is back.</span></div>
+      <div class="form-end"><button class="btn btn-main">Set rule</button><span class="hint">If the daemon cannot be reached, blocked rules go on refusing and each Envoy keeps its share of a limit for ten minutes; after that, limits are not enforced until it is back.</span></div>
     </form>
   </details>
 </section>

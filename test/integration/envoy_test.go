@@ -392,7 +392,8 @@ func TestStaticTargetThroughEnvoy(t *testing.T) {
 	if m.EnvoyVersion != version.EnvoyPinned {
 		t.Errorf("Envoy reports version %q, pinned %q", m.EnvoyVersion, version.EnvoyPinned)
 	}
-	if m.Cluster != xds.DefaultNodeCluster || len(m.Types) != 3 {
+	// Clusters, endpoints, listeners and routes.
+	if m.Cluster != xds.DefaultNodeCluster || len(m.Types) != 4 {
 		t.Errorf("member: cluster %q, types %+v", m.Cluster, m.Types)
 	}
 	waitListener(t, port)

@@ -79,6 +79,9 @@ type RateRules struct {
 	DeniedRate  float64 `json:"denied_rate"`  // refused, per second
 	// Refusing names the rules that are refusing requests now.
 	Refusing []string `json:"refusing"`
+	// NotHolding names the rules whose burst is not being kept: more
+	// Envoys share one of their counts than the burst.
+	NotHolding []string `json:"not_holding"`
 }
 
 type Overview struct {
@@ -149,12 +152,14 @@ type Fleet struct {
 }
 
 type TargetStatus struct {
-	VIPs    int          `json:"vips"`
-	Healthy int          `json:"healthy"`
-	Drained int          `json:"drained"`
-	Problem string       `json:"problem"`
-	Held    bool         `json:"held"`
-	Limit   *LimitStatus `json:"limit"`
+	VIPs    int `json:"vips"`
+	Healthy int `json:"healthy"`
+	Drained int `json:"drained"`
+	// Unusable counts VIPs left out because their address is not one.
+	Unusable int          `json:"unusable"`
+	Problem  string       `json:"problem"`
+	Held     bool         `json:"held"`
+	Limit    *LimitStatus `json:"limit"`
 }
 
 // Endpoint is one address served to Envoys for a target.
@@ -481,6 +486,17 @@ type RuleStatus struct {
 	Limit    string           `json:"limit"`
 	Sentence string           `json:"sentence"`
 	Status   ratelimit.Status `json:"status"`
+	// Holds is false while more Envoys share a count of the rule than its
+	// burst, so that more than its burst can pass at once.
+	Holds bool `json:"holds"`
+}
+
+// Refusals returns the latest requests rules refused, newest first.
+func (c *Client) Refusals(ctx context.Context, limit int) ([]ratelimit.Refusal, error) {
+	var out struct {
+		Refusals []ratelimit.Refusal `json:"refusals"`
+	}
+	return out.Refusals, c.get(ctx, fmt.Sprintf("/api/v1/refusals?limit=%d", limit), &out)
 }
 
 // Rules returns the request-rate rules in the order they apply.

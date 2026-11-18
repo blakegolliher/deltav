@@ -49,7 +49,7 @@ func Bootstrap(o BootstrapOptions) (*bootstrapv3.Bootstrap, error) {
 
 	// gRPC needs HTTP/2. Keepalive pings let Envoy notice a dead daemon and
 	// reconnect without waiting for TCP to time out.
-	h2, err := anypb.New(&upstreamhttpv3.HttpProtocolOptions{
+	h2, err := toAny(&upstreamhttpv3.HttpProtocolOptions{
 		UpstreamProtocolOptions: &upstreamhttpv3.HttpProtocolOptions_ExplicitHttpConfig_{
 			ExplicitHttpConfig: &upstreamhttpv3.HttpProtocolOptions_ExplicitHttpConfig{
 				ProtocolConfig: &upstreamhttpv3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
