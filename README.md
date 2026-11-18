@@ -197,8 +197,10 @@ sparkline), **CNodes** (the same per CNode; `enter` shows its VIPs), **Fleet** (
 filters, `s` sorts, `a` and `c` narrow by config state and connection, `pgup`/`pgdn` page; the
 daemon does the paging, so it stays quick with thousands of Envoys) and **Controls** (attached
 clusters, targets and CNodes; `e` sets a target's limit, `m` switches it between alert and
-enforce, `d` drains or undrains a CNode). `w` cycles the window between 1m, 5m and 1h; `q` quits. It follows the
-daemon's event stream and uses the terminal's own colors, so it suits light and dark themes.
+enforce, `d` drains or undrains a CNode, `?` shows the notes on limits). `w` cycles the window
+between 1m, 5m and 1h; `q` quits. It follows the daemon's event stream and uses the terminal's
+own colors, so it suits light and dark themes. In a narrow terminal (it is usable at 80 by 24)
+a table leaves out its least needed columns, and says which, rather than cut its rows short.
 
 All three take `--api` (default `http://127.0.0.1:18080`, or `DELTAV_API`) and, for a daemon
 that requires it, `DELTAV_API_TOKEN`. The list commands take `--json`.

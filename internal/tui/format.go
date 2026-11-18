@@ -114,6 +114,98 @@ func sparkline(history []float64, width int) string {
 	return b.String()
 }
 
+// fit makes a table narrow enough for width by leaving out whole columns,
+// in the order their titles are given in drop: the ones a reader can best do
+// without go first. A row cut off at the edge of the terminal would lose
+// whatever happens to be on the right, which is where limits and failures
+// are. It returns the columns and rows that remain, and the titles left
+// out, so the view can say what a wider terminal would show.
+func fit(cols []column, rows [][]string, width int, drop []string) ([]column, [][]string, []string) {
+	natural := func() int {
+		total := 2 * (len(cols) - 1)
+		for i, c := range cols {
+			w := lipgloss.Width(c.title)
+			for _, r := range rows {
+				if i < len(r) {
+					w = max(w, lipgloss.Width(r[i]))
+				}
+			}
+			total += w
+		}
+		return total
+	}
+	var hidden []string
+	for _, title := range drop {
+		if natural() <= width {
+			break
+		}
+		for i, c := range cols {
+			if c.title != title {
+				continue
+			}
+			cols = append(append([]column(nil), cols[:i]...), cols[i+1:]...)
+			for j, r := range rows {
+				if i < len(r) {
+					rows[j] = append(append([]string(nil), r[:i]...), r[i+1:]...)
+				}
+			}
+			hidden = append(hidden, title)
+			break
+		}
+	}
+	return cols, rows, hidden
+}
+
+// hiddenNote says which columns fit left out, or nothing if it left none.
+func hiddenNote(hidden []string, width int) []string {
+	if len(hidden) == 0 {
+		return nil
+	}
+	return dim("Not shown at this width: "+strings.Join(hidden, ", "), width)
+}
+
+// wrap breaks text into lines of at most width at its spaces.
+func wrap(text string, width int) []string {
+	return strings.Split(ansi.Wordwrap(text, max(width, 20), ""), "\n")
+}
+
+// dim wraps text to width and renders every line faint.
+func dim(text string, width int) []string {
+	lines := wrap(text, width)
+	for i, l := range lines {
+		lines[i] = styleDim.Render(l)
+	}
+	return lines
+}
+
+// pack lays items out on as few lines as it takes, never breaking one:
+// "s sort" stays together where a word wrap would part the key from what it
+// does.
+func pack(items []string, sep string, width int) []string {
+	var lines []string
+	line := ""
+	for _, it := range items {
+		switch {
+		case line == "":
+			line = it
+		case lipgloss.Width(line)+lipgloss.Width(sep)+lipgloss.Width(it) <= width:
+			line += sep + it
+		default:
+			lines = append(lines, line)
+			line = it
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	// A divider belongs between two groups on one line, not at a line's end
+	// or start.
+	for i, l := range lines {
+		lines[i] = strings.TrimPrefix(strings.TrimSuffix(l, sep+"│"), "│"+sep)
+	}
+	return lines
+}
+
 // column is one table column.
 type column struct {
 	title string

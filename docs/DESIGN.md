@@ -293,6 +293,15 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     `127.0.0.1:9901`. It has no authentication, and on a shared client host any local user
     could stop Envoy or read its config through it. `--admin-address` turns it on.
 
+43. **The TUI at 80 by 24.** A table that does not fit the terminal leaves out whole columns,
+    the least needed first (sparkline, byte rates, p50, addresses), and names them under the
+    table; it used to cut every row at the right edge, which is where the limit and the failure
+    counts are. Sentences, key hints and questions wrap, and a question's answer keys move to a
+    line of their own before they would be cut off. The notes on limits, which do not fit under
+    the Controls tables on a short terminal, have a screen of their own (`?`). The Fleet view
+    shows each Envoy's declared worker threads. Checked by running the binary in tmux against
+    the daemon with three real Envoys under load, at 80×24 and 150×40.
+
 ## Known gaps (POC)
 
 mTLS on the xDS and telemetry streams; daemon HA; per-group targeting of Envoys; long-term metric

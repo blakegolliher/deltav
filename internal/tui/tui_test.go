@@ -180,12 +180,153 @@ func press(m *Model, keys ...string) {
 
 func screen(m *Model) string { return ansi.Strip(m.View().Content) }
 
+// flat is a screen as running text: its lines joined, runs of space made
+// one. Sentences wrap where the terminal's width puts the break.
+func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
+
 func expect(t *testing.T, got string, wants ...string) {
 	t.Helper()
 	for _, w := range wants {
-		if !strings.Contains(got, w) {
+		if !strings.Contains(got, w) && !strings.Contains(flat(got), w) {
 			t.Errorf("the screen lacks %q:\n%s", w, got)
 		}
+	}
+}
+
+// fits fails if a line of the screen is wider than the terminal, or was cut
+// short to make it fit.
+func fits(t *testing.T, m *Model, what string) string {
+	t.Helper()
+	s := screen(m)
+	if n := strings.Count(s, "\n") + 1; n != m.height {
+		t.Errorf("%s: the screen is %d lines tall, the terminal %d", what, n, m.height)
+	}
+	for _, l := range strings.Split(s, "\n") {
+		if w := ansi.StringWidth(l); w > m.width {
+			t.Errorf("%s: line %q is %d wide in a %d-column terminal", what, l, w, m.width)
+		}
+		if strings.HasSuffix(l, "…") {
+			t.Errorf("%s: a line was cut off at the edge: %q", what, l)
+		}
+	}
+	return s
+}
+
+// A terminal of 80 columns by 24 rows, the size many open at. Tables leave
+// out whole columns, the least needed first, and say which; they never cut
+// a row at the edge, because the right-hand end is where limits and
+// failures are. Text and key hints wrap.
+func TestNarrowTerminal(t *testing.T) {
+	m := sample()
+	m.width, m.height = 80, 24
+
+	s := fits(t, m, "overview")
+	expect(t, s, "TARGET", "IN FLIGHT", "REQ/S", "P99", "403/S", "503/S", "LIMIT", "100 enforce OVER", "31ms",
+		"Not shown at this width: LAST 5 MIN, MB/S OUT, MB/S IN, P50, LISTEN", "1-4 view", "q quit")
+	for _, gone := range []string{"MB/S OUT ", "127.0.0.1:9000", "▁"} {
+		if strings.Contains(strings.Split(s, "Not shown")[0], gone) {
+			t.Errorf("overview at 80 columns still shows %q", gone)
+		}
+	}
+
+	press(m, "2", "enter")
+	s = fits(t, m, "cnodes")
+	expect(t, s, "CNODE", "STATE", "IN FLIGHT", "P99", "503/S", "OF LIMIT", "130/100 OVER", "ACTIVE drained", "├ 192.0.2.28:80",
+		"Idle keep-alive connections are not counted.", "Not shown at this width: LAST 5 MIN, MB/S OUT, MB/S IN, P50", "enter show or hide VIPs", "q quit")
+
+	press(m, "3")
+	s = fits(t, m, "fleet")
+	expect(t, s, "NODE", "WORKERS", "CONFIG", "LAST SEEN", "REQ/S", "IN FLIGHT", "host-002", "rejected",
+		"/ filter", "c connected", "pgup/pgdn page", "r refresh", "q quit")
+
+	press(m, "4")
+	s = fits(t, m, "controls")
+	expect(t, s, "VAST clusters", "vast.example.com", "Targets", "100 enforce OVER: 5 per Envoy per VIP (4 held back)",
+		"CNodes", "130/100 OVER", "e set limit", "d drain/undrain", "q quit")
+
+	// A question must show how to answer it, however narrow the terminal.
+	press(m, "down", "down", "d")
+	if m.confirm == nil {
+		t.Fatal("d on a CNode did not ask for confirmation")
+	}
+	for _, width := range []int{120, 80, 60, 40} {
+		m.width = width
+		s = screen(m)
+		expect(t, s, "Drain cnode-3-10?", "requests in flight finish.", "y drain", "any other key cancel")
+		lines := strings.Split(s, "\n")
+		if len(lines) != m.height {
+			t.Errorf("drain question at %d columns: the screen is %d lines tall, the terminal %d", width, len(lines), m.height)
+		}
+		// The question is the end of the screen; none of its lines is cut.
+		for _, l := range lines[len(lines)-4:] {
+			if ansi.StringWidth(l) > width || strings.HasSuffix(l, "…") {
+				t.Errorf("drain question at %d columns: %q does not fit", width, l)
+			}
+		}
+	}
+	press(m, "n")
+	m.width = 60
+	press(m, "up", "up", "e")
+	expect(t, screen(m), "Connections per CNode for main, 0 for no limit: 100█", "enter apply", "esc cancel")
+	press(m, "esc")
+	m.width = 80
+
+	// The state of the connection is not what falls off a narrow header.
+	press(m, "1")
+	m.width, m.live = 60, false
+	m.lastEvent = m.now().Add(-12 * time.Second)
+	expect(t, fits(t, m, "header at 60 columns"), "4 Controls", "window 1m", "○ disconnected 12s ago")
+}
+
+// On a short terminal the notes on limits do not fit under the Controls
+// tables; "?" gives them the screen.
+func TestAboutLimits(t *testing.T) {
+	m := sample()
+	m.width, m.height = 80, 24
+	press(m, "?")
+	if m.about {
+		t.Error("? did something outside the Controls view")
+	}
+	press(m, "4")
+	expect(t, screen(m), "? about limits")
+	press(m, "?")
+	s := fits(t, m, "about limits")
+	expect(t, s, "About limits and drain", "requests in flight", "alert reports CNodes over it and enforces nothing.",
+		"limit ÷ (connected Envoys × most VIPs on one CNode), less one for each worker thread",
+		"never below 1", "makes requests wait", "makes Envoys reconnect", "Nothing changes on the VAST cluster.", "any key to go back")
+	if strings.Contains(s, "VAST clusters") {
+		t.Error("the notes should have the screen to themselves")
+	}
+	press(m, "e") // any key goes back, and is not then taken as a command
+	if m.about || m.editing != nil {
+		t.Errorf("after a key: about %v, editing %v", m.about, m.editing)
+	}
+	expect(t, screen(m), "VAST clusters", "Targets")
+}
+
+// What an enforced limit cannot do is said in full on the Controls view.
+func TestControlsCaveats(t *testing.T) {
+	m := sample()
+	m.height = 50
+	l := m.targets[0].Status.Limit
+	l.PerCNode, l.Share, l.Computed, l.Envoys, l.Workers, l.Holds, l.Undeclared = 9, 1, 1, 3, 2, false, 2
+	m.fleet.Members[0].Workers = 2
+	press(m, "4")
+	expect(t, screen(m), "1 per Envoy per VIP, cannot hold",
+		"main cannot hold its limit: 3 Envoys × 2 VIPs on one CNode × 2 worker threads is more than 9, and no Envoy's cap can be below 1.",
+		"Raise the limit, or run the Envoys with fewer worker threads.",
+		"main: 2 connected Envoys do not say how many worker threads they run (see the Fleet view)")
+	// The Fleet view shows which: a count for those that say, "?" for a
+	// connected Envoy that does not, nothing for one that is gone.
+	press(m, "3")
+	rows := map[string]string{}
+	for _, line := range strings.Split(screen(m), "\n") {
+		if f := strings.Fields(line); len(f) > 2 && strings.HasPrefix(f[0], "host-") {
+			rows[f[0]] = f[2]
+		}
+	}
+	if rows["host-001"] != "2" || rows["host-002"] != "?" || rows["host-003"] != "disconnected" {
+		t.Errorf("WORKERS column: %v (host-003 is disconnected, so its third field is its CONFIG)", rows)
 	}
 }
 

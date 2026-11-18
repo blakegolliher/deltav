@@ -67,37 +67,58 @@ func (m *Model) header() []string {
 		status = styleBad.Render("○ disconnected " + age(m.now(), m.lastEvent) + " ago")
 	}
 	right := "window " + styleHead.Render(windows[m.window]) + "  " + status
-	gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 2)
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 2 {
+		// Too narrow for one line: the state of the connection must not be
+		// what falls off the edge.
+		return []string{left, right, ""}
+	}
 	return []string{left + strings.Repeat(" ", gap) + right, ""}
 }
 
 func (m *Model) footer() []string {
-	// The view's own keys come first: on a narrow terminal the line is cut
-	// from the right, and these are the ones not shown anywhere else.
-	keys := "1-4 view  w window  ↑↓ move  r refresh  q quit"
+	// The view's own keys come first: they are the ones not shown anywhere
+	// else. On a narrow terminal the hints take a second line.
+	keys := []string{"1-4 view", "w window", "↑↓ move", "r refresh", "q quit"}
 	switch m.tab {
 	case tabCNodes:
-		keys = "enter show VIPs  │  " + keys
+		keys = append([]string{"enter show or hide VIPs", "│"}, keys...)
 	case tabFleet:
-		keys = "/ filter  x clear  s sort  o order  a state  c connected  pgup/pgdn page  │  " + keys
+		keys = append([]string{"/ filter", "x clear", "s sort", "o order", "a state", "c connected", "pgup/pgdn page", "│"}, keys...)
 	case tabControls:
-		keys = "e set limit  m alert/enforce  d drain/undrain  │  " + keys
+		keys = append([]string{"e set limit", "m alert/enforce", "d drain/undrain", "? about limits", "│"}, keys...)
 	}
 	if m.filtering {
-		keys = "type to filter by node ID, address or version  │  enter apply  esc cancel"
+		keys = []string{"type to filter by node ID, address or version", "│", "enter apply", "esc cancel"}
 	}
-	last := styleDim.Render(keys)
-	// A question takes the place of the key hints until it is answered.
+	if m.about {
+		keys = []string{"any key to go back"}
+	}
+	last := pack(keys, "  ", m.width)
+	for i, l := range last {
+		last[i] = styleDim.Render(l)
+	}
+	// A question takes the place of the key hints until it is answered. Its
+	// answer keys go on a line of their own if they would not fit beside it:
+	// a question with no visible way to answer it is a trap.
+	ask := func(question, answers string) []string {
+		lines := wrap(question, m.width)
+		for i, l := range lines {
+			lines[i] = styleHead.Render(l)
+		}
+		if n := len(lines) - 1; lipgloss.Width(lines[n])+3+lipgloss.Width(answers) <= m.width {
+			lines[n] += "   " + styleDim.Render(answers)
+			return lines
+		}
+		return append(lines, styleDim.Render(answers))
+	}
 	switch {
 	case m.editing != nil:
-		last = styleHead.Render(fmt.Sprintf("Connections per CNode for %s, 0 for no limit: %s█", m.editing.target, m.editing.draft)) +
-			styleDim.Render("   enter apply  esc cancel")
+		last = ask(fmt.Sprintf("Connections per CNode for %s, 0 for no limit: %s█", m.editing.target, m.editing.draft), "enter apply  esc cancel")
 	case m.confirm != nil && m.confirm.drain:
-		last = styleHead.Render(fmt.Sprintf("Drain %s? Its VIPs leave every Envoy at once; requests in flight finish.", m.confirm.cnode)) +
-			styleDim.Render("   y drain  any other key cancel")
+		last = ask(fmt.Sprintf("Drain %s? Its VIPs leave every Envoy at once; requests in flight finish.", m.confirm.cnode), "y drain  any other key cancel")
 	case m.confirm != nil:
-		last = styleHead.Render(fmt.Sprintf("Undrain %s? Its VIPs are served to every Envoy again.", m.confirm.cnode)) +
-			styleDim.Render("   y undrain  any other key cancel")
+		last = ask(fmt.Sprintf("Undrain %s? Its VIPs are served to every Envoy again.", m.confirm.cnode), "y undrain  any other key cancel")
 	}
 	status := ""
 	switch {
@@ -106,7 +127,7 @@ func (m *Model) footer() []string {
 	case m.notice != "" && m.tab == tabControls:
 		status = styleGood.Render("✓ " + m.notice)
 	}
-	return []string{status, last}
+	return append([]string{status}, last...)
 }
 
 // limitCell is a target's limit for a table: "-", "100 alert", "100 enforce".
@@ -205,7 +226,7 @@ func (m *Model) overviewView() ([]string, int) {
 	if m.overview == nil {
 		return []string{styleDim.Render("Waiting for the daemon…")}, -1
 	}
-	out := []string{m.fleetLine(), ""}
+	out := append(wrap(m.fleetLine(), m.width), "")
 	if len(m.overview.Targets) == 0 {
 		return append(out, "No targets yet.", "",
 			styleDim.Render("Attach a VAST cluster and add a target:"),
@@ -226,15 +247,22 @@ func (m *Model) overviewView() ([]string, int) {
 		rows = append(rows, append(row, limitCell(t.Limit, t.Over), sparkline(t.RateHistory, 29)))
 		// Limit breaches lead: they are what an operator opens this for.
 		for _, o := range t.Over {
-			out = append(out, styleBad.Render(fmt.Sprintf("Over the limit: %s on %s has %d in flight, limit %d", t.Name, o.CNode, o.InFlight, o.PerCNode)))
+			for _, l := range wrap(fmt.Sprintf("Over the limit: %s on %s has %d in flight, limit %d", t.Name, o.CNode, o.InFlight, o.PerCNode), m.width) {
+				out = append(out, styleBad.Render(l))
+			}
 			breached = true
 		}
 	}
 	if breached {
 		out = append(out, "")
 	}
+	cols, rows, hidden := fit(cols, rows, m.width, []string{"LAST 5 MIN", "MB/S OUT", "MB/S IN", "P50", "LISTEN", "ENDPOINTS", "P99", "REQ/S"})
 	out = append(out, table(cols, rows, m.cursor[tabOverview], m.width)...)
-	return out, len(out) - len(rows) + m.cursor[tabOverview]
+	focus := len(out) - len(rows) + m.cursor[tabOverview]
+	if note := hiddenNote(hidden, m.width); note != nil {
+		out = append(append(out, ""), note...)
+	}
+	return out, focus
 }
 
 func (m *Model) cnodesView() ([]string, int) {
@@ -284,8 +312,11 @@ func (m *Model) cnodesView() ([]string, int) {
 			}
 		}
 	}
+	cols, rows, hidden := fit(cols, rows, m.width, []string{"LAST 5 MIN", "MB/S OUT", "MB/S IN", "P50", "VIPS", "P99", "REQ/S"})
 	out := table(cols, rows, selected, m.width)
-	out = append(out, "", styleDim.Render("In flight: requests Envoys have outstanding, from load reports. Idle keep-alive connections are not counted."))
+	out = append(out, "")
+	out = append(out, dim("In flight: requests Envoys have outstanding, from load reports. Idle keep-alive connections are not counted.", m.width)...)
+	out = append(out, hiddenNote(hidden, m.width)...)
 	return out, selected + 1
 }
 
@@ -311,7 +342,7 @@ func (m *Model) fleetView() ([]string, int) {
 	if m.fleet == nil {
 		return append(out, styleDim.Render("Reading the fleet…")), -1
 	}
-	cols := []column{{"NODE", false}, {"ENVOY", false}, {"CONFIG", false}, {"LAST SEEN", true},
+	cols := []column{{"NODE", false}, {"ENVOY", false}, {"WORKERS", true}, {"CONFIG", false}, {"LAST SEEN", true},
 		{"REQ/S", true}, {"IN FLIGHT", true}, {"P99", true}, {"ADDRESS", false}}
 	var rows [][]string
 	for _, e := range m.fleet.Members {
@@ -326,10 +357,20 @@ func (m *Model) fleetView() ([]string, int) {
 		case e.ConfigVersion != m.fleet.ConfigVersion:
 			config = styleWarn.Render("behind")
 		}
-		rows = append(rows, []string{e.NodeID, e.EnvoyVersion, config, age(m.now(), e.LastSeen),
+		// Worker threads, as the Envoy declares them; "?" for one that is
+		// connected and does not say (the enforce cap cannot allow for it).
+		workers := ""
+		switch {
+		case e.Workers > 0:
+			workers = fmt.Sprint(e.Workers)
+		case e.Connected:
+			workers = styleWarn.Render("?")
+		}
+		rows = append(rows, []string{e.NodeID, e.EnvoyVersion, workers, config, age(m.now(), e.LastSeen),
 			rate(e.Stats.RequestRate), fmt.Sprint(e.InFlight), millis(e.Stats.LatencyMS.P99), e.Address})
 	}
 	cur := m.cursor[tabFleet]
+	cols, rows, hidden := fit(cols, rows, m.width, []string{"ADDRESS", "P99", "ENVOY", "WORKERS"})
 	out = append(out, table(cols, rows, cur, m.width)...)
 	focus := len(out) - len(rows) + cur
 	if len(rows) == 0 {
@@ -342,18 +383,51 @@ func (m *Model) fleetView() ([]string, int) {
 	}
 	out = append(out, "", styleDim.Render(fmt.Sprintf("Rows %d-%d of %d matching · %d Envoys, %d connected",
 		first, m.fleet.Offset+len(rows), m.fleet.Matched, m.fleet.Total, m.fleet.Connected)))
+	out = append(out, hiddenNote(hidden, m.width)...)
 	// Why the selected Envoy rejected its config, in Envoy's words.
 	if cur < len(m.fleet.Members) {
 		if e := m.fleet.Members[cur]; e.ConfigError != "" {
-			out = append(out, styleBad.Render(e.NodeID+" rejected the config: ")+e.ConfigError)
+			for _, l := range wrap(e.NodeID+" rejected the config: "+e.ConfigError, m.width) {
+				out = append(out, styleBad.Render(l))
+			}
 		}
 	}
 	return out, focus
 }
 
+// aboutLimits is what an operator should know before setting a limit or
+// draining a CNode. It is shown under the Controls tables and, by "?", on a
+// screen of its own.
+var aboutLimits = []string{
+	"A limit is the connections (requests in flight) the fleet should hold to any one CNode for a target.",
+	"alert reports CNodes over it and enforces nothing.",
+	"enforce also caps every Envoy, at limit ÷ (connected Envoys × most VIPs on one CNode), less one for each worker thread an Envoy runs beyond the first, never below 1. At its cap an Envoy makes requests wait; it does not fail them or send them elsewhere.",
+	"The cap is each Envoy's own, which is why the limit is divided: once Envoys × VIPs × worker threads is more than the limit, no cap can hold it.",
+	"Changing the cap makes Envoys reconnect, so as Envoys come and go a new cap is held back until it differs enough. A limit you set here is sent at once.",
+	"Drain withholds a CNode's VIPs from every Envoy until it is undrained. Nothing changes on the VAST cluster.",
+	"Clusters and targets are added and removed with \"deltav vast\" and \"deltav target\".",
+}
+
 func (m *Model) controlsView() ([]string, int) {
 	if !m.loaded {
 		return []string{styleDim.Render("Reading clusters and targets…")}, -1
+	}
+	if m.about {
+		// With a blank line between the notes if the terminal is tall
+		// enough for that, and without if not.
+		room := m.height - len(m.header()) - len(m.footer())
+		for _, gap := range []bool{true, false} {
+			out := []string{styleHead.Render("About limits and drain"), ""}
+			for i, para := range aboutLimits {
+				if gap && i > 0 {
+					out = append(out, "")
+				}
+				out = append(out, wrap(para, min(m.width, 100))...)
+			}
+			if len(out) <= room || !gap {
+				return out, -1
+			}
+		}
 	}
 	out := []string{styleHead.Render("VAST clusters")}
 	if len(m.clusters) == 0 {
@@ -371,12 +445,14 @@ func (m *Model) controlsView() ([]string, int) {
 			}
 			rows = append(rows, []string{c.Name, c.Host, fmt.Sprint(c.CNodes), fmt.Sprint(c.Pools), fmt.Sprint(c.VIPs), last, status})
 		}
-		out = append(out, table([]column{{"NAME", false}, {"HOST", false}, {"CNODES", true}, {"POOLS", true}, {"VIPS", true},
-			{"LAST READ", true}, {"STATUS", false}}, rows, -1, m.width)...)
+		cols, rows, _ := fit([]column{{"NAME", false}, {"HOST", false}, {"CNODES", true}, {"POOLS", true}, {"VIPS", true},
+			{"LAST READ", true}, {"STATUS", false}}, rows, m.width, []string{"POOLS", "VIPS", "CNODES", "HOST"})
+		out = append(out, table(cols, rows, -1, m.width)...)
 	}
 	out = append(out, "", styleHead.Render("Targets"))
 	focus := -1
 	cur := m.cursor[tabControls]
+	var caveats []string // what an enforced limit cannot do, said in full below the tables
 	if len(m.targets) == 0 {
 		out = append(out, styleDim.Render("  none"))
 	} else {
@@ -417,7 +493,13 @@ func (m *Model) controlsView() ([]string, int) {
 							limit += styleDim.Render(fmt.Sprintf(" (%d held back)", l.Computed))
 						}
 						if !l.Holds {
-							limit += " " + styleWarn.Render("cannot hold")
+							limit += ", " + styleWarn.Render("cannot hold")
+							caveats = append(caveats, fmt.Sprintf("%s cannot hold its limit: %d Envoys × %d VIPs on one CNode × %d worker threads is more than %d, and no Envoy's cap can be below 1. Raise the limit, or run the Envoys with fewer worker threads.",
+								t.Name, max(l.Envoys, 1), max(l.MaxVIPsPerCNode, 1), max(l.Workers, 1), l.PerCNode))
+						}
+						if l.Undeclared > 0 {
+							caveats = append(caveats, fmt.Sprintf("%s: %d connected Envoys do not say how many worker threads they run (see the Fleet view), and can exceed their cap by that number less one.",
+								t.Name, l.Undeclared))
 						}
 					}
 				}
@@ -429,8 +511,9 @@ func (m *Model) controlsView() ([]string, int) {
 			selected = cur
 			focus = len(out) + 1 + cur
 		}
-		out = append(out, table([]column{{"NAME", false}, {"LISTEN", false}, {"FROM", false}, {"TLS", false}, {"ENDPOINTS", true},
-			{"LIMIT", false}, {"STATUS", false}}, rows, selected, m.width)...)
+		cols, rows, _ := fit([]column{{"NAME", false}, {"LISTEN", false}, {"FROM", false}, {"TLS", false}, {"ENDPOINTS", true},
+			{"LIMIT", false}, {"STATUS", false}}, rows, m.width, []string{"TLS", "ENDPOINTS", "LISTEN", "FROM", "STATUS"})
+		out = append(out, table(cols, rows, selected, m.width)...)
 	}
 	out = append(out, "", styleHead.Render("CNodes"))
 	if len(m.control) == 0 {
@@ -445,15 +528,21 @@ func (m *Model) controlsView() ([]string, int) {
 			selected = i
 			focus = len(out) + 1 + i
 		}
-		out = append(out, table([]column{{"CNODE", false}, {"STATE", false}, {"VIPS", true}, {"IN FLIGHT", true}, {"OF LIMIT", false}},
-			rows, selected, m.width)...)
+		cols, rows, _ := fit([]column{{"CNODE", false}, {"STATE", false}, {"VIPS", true}, {"IN FLIGHT", true}, {"OF LIMIT", false}},
+			rows, m.width, []string{"VIPS"})
+		out = append(out, table(cols, rows, selected, m.width)...)
 	}
-	out = append(out, "",
-		styleDim.Render("A limit is the connections (requests in flight) the fleet should hold to any one CNode for a target."),
-		styleDim.Render("alert reports CNodes over it. enforce also caps every Envoy, at limit ÷ (connected Envoys × most VIPs on"),
-		styleDim.Render("one CNode), less one for each worker thread an Envoy runs beyond the first, never below 1. Changing the"),
-		styleDim.Render("cap makes Envoys reconnect, so as Envoys come and go a new cap is held back until it differs enough."),
-		styleDim.Render("Drain withholds a CNode's VIPs from every Envoy until it is undrained. Nothing changes on the VAST cluster."),
-		styleDim.Render("Clusters and targets are added and removed with \"deltav vast\" and \"deltav target\"."))
+	if len(caveats) > 0 {
+		out = append(out, "")
+		for _, c := range caveats {
+			for _, l := range wrap(c, m.width) {
+				out = append(out, styleWarn.Render(l))
+			}
+		}
+	}
+	out = append(out, "")
+	for _, para := range aboutLimits {
+		out = append(out, dim(para, min(m.width, 110))...)
+	}
 	return out, focus
 }

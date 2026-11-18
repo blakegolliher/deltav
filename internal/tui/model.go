@@ -88,6 +88,11 @@ type Model struct {
 	connIndex   int
 	filtering   bool   // typing a filter
 	filterDraft string // what has been typed so far
+
+	// about is true while the notes on limits and drain fill the screen
+	// ("?" on the Controls view): on a short terminal they do not fit
+	// under the tables.
+	about bool
 }
 
 // New builds the model for a daemon's API.
@@ -310,6 +315,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
+	if m.about {
+		// Any key puts the notes away; quitting still quits.
+		m.about = false
+		if k == "q" || k == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	if m.editing != nil {
 		return m.editKey(k, msg)
 	}
@@ -358,6 +371,11 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch k {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "?":
+		if m.tab == tabControls {
+			m.about = true
+		}
+		return m, nil
 	case "1", "2", "3", "4":
 		return switchTo(tab(k[0] - '1'))
 	case "tab", "right", "l":
