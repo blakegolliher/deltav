@@ -70,6 +70,15 @@ var (
 	descDrained = prometheus.NewDesc("deltav_cnode_drained",
 		"1 for a CNode whose VIPs an operator has withheld from Envoys.", []string{"cluster", "cnode"}, nil)
 
+	descRuleRequests = prometheus.NewDesc("deltav_rate_limit_requests_total",
+		"Requests a rate rule matched, as Envoys report them every few seconds: let through (allowed) or refused (denied).",
+		[]string{"rule", "result"}, nil)
+	descRuleKeys = prometheus.NewDesc("deltav_rate_limit_keys",
+		"What a rate rule is counting separately now: access keys, buckets or prefixes with requests in the last reports.",
+		[]string{"rule"}, nil)
+	descRuleOverflow = prometheus.NewDesc("deltav_rate_limit_keys_overflow_total",
+		"Keys left unlimited because their rule already had as many as the daemon remembers.", nil, nil)
+
 	descMemberRequests = prometheus.NewDesc("deltav_member_requests_total",
 		"Requests finished by one Envoy, by status class. Only with --metrics-per-member.",
 		[]string{"node", "class"}, nil)
@@ -147,6 +156,14 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 	gauge(descConfig, float64(counts.Pending), string(fleet.StatePending))
 	counter(descEntries, c.s.telemetry.Entries())
 	counter(descReports, c.s.telemetry.Reports())
+
+	rules, overflow := c.s.quota.Status()
+	for name, st := range rules {
+		counter(descRuleRequests, st.Totals.Allowed, name, "allowed")
+		counter(descRuleRequests, st.Totals.Denied, name, "denied")
+		gauge(descRuleKeys, float64(st.Keys), name)
+	}
+	counter(descRuleOverflow, overflow)
 
 	if c.perMember {
 		for node, t := range c.s.agg.MemberTotals() {

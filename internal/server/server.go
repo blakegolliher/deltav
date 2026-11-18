@@ -24,6 +24,7 @@ import (
 
 	"deltav/internal/fleet"
 	"deltav/internal/metrics"
+	"deltav/internal/ratelimit"
 	"deltav/internal/state"
 	"deltav/internal/telemetry"
 	"deltav/internal/version"
@@ -93,6 +94,7 @@ type Server struct {
 	telemetry *telemetry.Server
 	store     *state.Store
 	poller    *poller
+	quota     *ratelimit.Server
 
 	staticMu sync.RWMutex
 	static   []xds.TargetSpec // the static targets; see SetStaticTargets
@@ -159,6 +161,10 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s.store = store
+	// The quota service divides each rate rule's rate among the Envoys.
+	s.quota = ratelimit.NewServer(log)
+	s.quota.Register(s.grpc)
+	s.quota.SetRules(store.Rules())
 	s.poller = newPoller(s, cfg.VASTPollInterval)
 	// Before any Envoy can connect: serve the VAST targets with the
 	// endpoints they had at the last shutdown. An Envoy that reconnects to
@@ -221,6 +227,10 @@ func (s *Server) apiRoutes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/vast", s.handleClusterAdd)
 	mux.HandleFunc("DELETE /api/v1/vast/{name}", s.handleClusterRemove)
 	mux.HandleFunc("GET /api/v1/vast/{name}/pools", s.handleClusterPools)
+	mux.HandleFunc("GET /api/v1/rules", s.handleRules)
+	mux.HandleFunc("PUT /api/v1/rules/{name}", s.handleRuleSet)
+	mux.HandleFunc("DELETE /api/v1/rules/{name}", s.handleRuleRemove)
+	mux.HandleFunc("GET /api/v1/s3-operations", s.handleOperations)
 	mux.HandleFunc("GET /api/v1/cnodes", s.handleCNodes)
 	mux.HandleFunc("GET /api/v1/endpoints", s.handleEndpoints)
 	mux.HandleFunc("GET /api/v1/fleet", s.handleFleet)

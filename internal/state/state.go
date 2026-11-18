@@ -17,6 +17,8 @@ import (
 	"regexp"
 	"sort"
 	"sync"
+
+	"deltav/internal/ratelimit"
 )
 
 // Cluster is one VAST cluster: a management endpoint plus credentials.
@@ -82,6 +84,8 @@ type file struct {
 	Clusters []Cluster `json:"clusters"`
 	Targets  []Target  `json:"targets"`
 	Drained  []Drain   `json:"drained,omitempty"`
+	// Rules are the request-rate rules, in the order they are applied.
+	Rules []ratelimit.Rule `json:"rules,omitempty"`
 }
 
 const (
@@ -95,6 +99,10 @@ var (
 	ErrConflict = errors.New("conflict")
 	ErrInvalid  = errors.New("invalid")
 )
+
+// MaxRules bounds the request-rate rules: every rule is a filter each
+// request passes through in every Envoy.
+const MaxRules = 64
 
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
@@ -132,6 +140,11 @@ func Open(dir string) (*Store, error) {
 		return nil, fmt.Errorf("state file: %w", err)
 	}
 	if err := json.Unmarshal(b, &s.data); err != nil {
+		return nil, fmt.Errorf("state file %s: %w", filepath.Join(dir, stateFile), err)
+	}
+	// Rules are checked when they are set; a file edited by hand, or written
+	// by a version that knew other operations, is checked again here.
+	if err := ratelimit.Validate(s.data.Rules); err != nil {
 		return nil, fmt.Errorf("state file %s: %w", filepath.Join(dir, stateFile), err)
 	}
 	return s, nil
@@ -358,6 +371,71 @@ func (s *Store) SetTargetLimit(name string, l *Limit) error {
 		return nil
 	}
 	return fmt.Errorf("%w: no target %q", ErrNotFound, name)
+}
+
+// Rules returns the request-rate rules, in the order they are applied.
+func (s *Store) Rules() []ratelimit.Rule {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ratelimit.Rule(nil), s.data.Rules...)
+}
+
+// SetRule adds a rule, or replaces the rule of the same name where it
+// stands. The rule is normalized first.
+func (s *Store) SetRule(r ratelimit.Rule) error {
+	if err := r.Normalize(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rules := append([]ratelimit.Rule(nil), s.data.Rules...)
+	replaced := false
+	for i := range rules {
+		if rules[i].Name == r.Name {
+			rules[i], replaced = r, true
+		}
+	}
+	if !replaced {
+		if len(rules) >= MaxRules {
+			return fmt.Errorf("%w: there are already %d rules, which is the most there can be", ErrConflict, MaxRules)
+		}
+		rules = append(rules, r)
+	}
+	return s.setRules(rules)
+}
+
+// RemoveRule removes a rule.
+func (s *Store) RemoveRule(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var rules []ratelimit.Rule
+	for _, r := range s.data.Rules {
+		if r.Name != name {
+			rules = append(rules, r)
+		}
+	}
+	if len(rules) == len(s.data.Rules) {
+		return fmt.Errorf("%w: no rule %q", ErrNotFound, name)
+	}
+	return s.setRules(rules)
+}
+
+// ReplaceRules puts back a list of rules as it was, after a change that
+// could not be served.
+func (s *Store) ReplaceRules(rules []ratelimit.Rule) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.setRules(append([]ratelimit.Rule(nil), rules...))
+}
+
+func (s *Store) setRules(rules []ratelimit.Rule) error {
+	prev := s.data.Rules
+	s.data.Rules = rules
+	if err := s.save(); err != nil {
+		s.data.Rules = prev
+		return err
+	}
+	return nil
 }
 
 // Drained returns the drained CNodes.

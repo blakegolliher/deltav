@@ -430,6 +430,11 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 	}
 	p.mu.Unlock()
 
+	// Request-rate rules apply to every target alike.
+	rules := p.s.store.Rules()
+	for i := range specs {
+		specs[i].RateLimits = rules
+	}
 	version, changed, err = p.s.xds.Update(ctx, specs)
 	if err != nil {
 		p.s.log.Error("cannot serve the targets", "error", err)

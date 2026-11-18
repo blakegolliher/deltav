@@ -21,6 +21,8 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"deltav/internal/ratelimit"
 )
 
 // ControlCluster is the static bootstrap cluster that points back at the
@@ -40,6 +42,9 @@ type TargetSpec struct {
 	HealthCheck  HealthCheckSpec
 	AccessLog    bool   // stream per-request entries to the daemon (ALS)
 	PerHostLimit uint32 // enforce mode: per_host_thresholds.max_connections; 0 = none
+	// RateLimits are the request-rate rules, normalized, in the order they
+	// are applied (see ratelimit.go).
+	RateLimits []ratelimit.Rule
 }
 
 // Endpoint is one VIP. CNode is carried as metadata for debugging only;
@@ -100,6 +105,10 @@ func (t TargetSpec) Resources() (*listenerv3.Listener, *clusterv3.Cluster, *endp
 }
 
 func (t TargetSpec) listener() (*listenerv3.Listener, error) {
+	limiters, marks, err := t.rateLimitFilters()
+	if err != nil {
+		return nil, err
+	}
 	route := &routev3.RouteConfiguration{
 		Name: t.Name,
 		// An inline route table is validated against known clusters by
@@ -120,6 +129,9 @@ func (t TargetSpec) listener() (*listenerv3.Listener, error) {
 					// No retry policy: SDKs retry; stacked retries amplify.
 					Timeout: durationpb.New(0),
 				}},
+				// What the rate-limit script wrote for the quota filters
+				// is not for VAST to see.
+				RequestHeadersToRemove: marks,
 			}},
 		}},
 	}
@@ -131,10 +143,10 @@ func (t TargetSpec) listener() (*listenerv3.Listener, error) {
 		StatPrefix:     t.Name,
 		CodecType:      hcmv3.HttpConnectionManager_AUTO,
 		RouteSpecifier: &hcmv3.HttpConnectionManager_RouteConfig{RouteConfig: route},
-		HttpFilters: []*hcmv3.HttpFilter{{
+		HttpFilters: append(limiters, &hcmv3.HttpFilter{
 			Name:       "envoy.filters.http.router",
 			ConfigType: &hcmv3.HttpFilter_TypedConfig{TypedConfig: router},
-		}},
+		}),
 		// S3 SDKs send "Expect: 100-continue"; without this Envoy strips
 		// the header (breaking a signature that covers it) and answers
 		// 100 itself, so the client streams a body the server may reject.
