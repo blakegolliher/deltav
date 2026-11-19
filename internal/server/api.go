@@ -88,6 +88,10 @@ type targetJSON struct {
 	// exceed its limit now.
 	Over      []cnodeUsage   `json:"over,omitempty"`
 	Endpoints []endpointJSON `json:"endpoints"` // what Envoys are served
+	// NoAnswer is set while Envoys are answering requests for this target
+	// themselves, with 5xx, because VAST gives none: they cannot connect,
+	// or cannot verify its certificate. It says why.
+	NoAnswer *noAnswer `json:"no_answer,omitempty"`
 }
 
 type targetsResponse struct {
@@ -110,12 +114,13 @@ func (s *Server) targetList() []targetJSON {
 	usage := s.limitUsage()
 	out := []targetJSON{}
 	for _, t := range s.staticTargets() {
-		out = append(out, targetJSON{Name: t.Name, ListenPort: t.ListenPort, TLS: t.TLS != nil, Source: "static", Endpoints: served[t.Name]})
+		out = append(out, targetJSON{Name: t.Name, ListenPort: t.ListenPort, TLS: t.TLS != nil, Source: "static", Endpoints: served[t.Name], NoAnswer: s.failures.of(t.Name)})
 	}
 	for _, t := range s.store.Targets() {
 		tj := targetJSON{
 			Name: t.Name, ListenPort: t.ListenPort, TLS: t.TLS != nil, Source: "vast",
 			Cluster: t.Cluster, Pool: t.Pool, Tenant: t.Tenant, Port: t.Port, Endpoints: served[t.Name],
+			NoAnswer: s.failures.of(t.Name),
 		}
 		if st, ok := s.poller.targetStatus(t.Name); ok {
 			tj.Status = &st

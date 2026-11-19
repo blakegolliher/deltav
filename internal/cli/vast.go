@@ -13,6 +13,9 @@ import (
 
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
+
+	"deltav/internal/apiclient"
+	"deltav/internal/xds"
 )
 
 func newVastCmd() *cobra.Command {
@@ -197,8 +200,12 @@ func newTargetAddCmd() *cobra.Command {
 		Long: "Add a target. Every Envoy then listens on 127.0.0.1:LISTEN-PORT and balances requests\n" +
 			"across the pool's VIPs that sit on healthy CNodes. S3 clients must use path-style\n" +
 			"addressing against that address.\n\n" +
-			"With --tls, Envoy connects to the VIPs over TLS and needs --tls-server-name: the name\n" +
-			"to send as SNI and to find in the certificate. The loopback side stays plain HTTP.",
+			"With --tls, Envoy connects to the VIPs over TLS. It needs --tls-server-name, the name\n" +
+			"to send as SNI and to find in the certificate, and --tls-ca-file, the path on the\n" +
+			"client hosts of the CA bundle the certificate must chain to. Envoy does not use a\n" +
+			"host's trust store unless told where it is: " + xds.CABundlePaths + ".\n" +
+			"--tls-insecure connects without verifying anything, for a lab cluster with its\n" +
+			"factory certificate. The loopback side stays plain HTTP either way.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cluster == "" || pool == "" || port == 0 || listenPort == 0 {
@@ -227,7 +234,7 @@ func newTargetAddCmd() *cobra.Command {
 	fl.Uint32Var(&listenPort, "listen-port", 0, "loopback port Envoy listens on, on every client host")
 	fl.BoolVar(&useTLS, "tls", false, "connect to the VIPs over TLS")
 	fl.StringVar(&tlsServerName, "tls-server-name", "", "with --tls: name to send as SNI and to verify in the certificate")
-	fl.StringVar(&tlsCAFile, "tls-ca-file", "", "with --tls: CA bundle path on the client hosts (default: the host's trust store)")
+	fl.StringVar(&tlsCAFile, "tls-ca-file", "", "with --tls: path, on the client hosts, of the CA bundle VAST's certificate must chain to; needed unless --tls-insecure")
 	fl.BoolVar(&tlsInsecure, "tls-insecure", false, "with --tls: do not verify the certificate (lab use)")
 	return annotateEnv(cmd)
 }
@@ -255,6 +262,7 @@ type targetRow struct {
 		CNode    string
 		InFlight uint64 `json:"in_flight"`
 	}
+	NoAnswer *apiclient.NoAnswer `json:"no_answer"`
 }
 
 // limit is the target list's LIMIT cell.
@@ -271,6 +279,15 @@ func (t targetRow) limit() string {
 }
 
 func (t targetRow) status() string {
+	s := t.resolved()
+	if t.NoAnswer != nil {
+		s += "; " + t.NoAnswer.Sentence()
+	}
+	return s
+}
+
+// resolved says how the target's endpoints were arrived at.
+func (t targetRow) resolved() string {
 	switch {
 	case t.Status == nil:
 		return "static"

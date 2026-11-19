@@ -400,6 +400,16 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 	known := map[string]bool{}
 	for _, t := range targets {
 		known[t.Name] = true
+		if t.TLS != nil {
+			// A target stored by an earlier build may ask for what Envoy
+			// cannot do. Served, it would be rejected by every Envoy; it is
+			// left out, with the reason, and the other targets go on.
+			if err := (&xds.TLSSpec{ServerName: t.TLS.ServerName, CAFile: t.TLS.CAFile, Insecure: t.TLS.Insecure}).Validate(); err != nil {
+				p.status[t.Name] = targetStatus{Problem: "not served: " + err.Error() + "; remove the target and add it again"}
+				delete(p.served, t.Name)
+				continue
+			}
+		}
 		prev, had := p.served[t.Name]
 		view := p.views[t.Cluster]
 		var (

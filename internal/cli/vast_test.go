@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"deltav/internal/apiclient"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -99,8 +100,14 @@ func TestVastAndTargetCommands(t *testing.T) {
 	if got != "added s3: 127.0.0.1:9000 on every client, 6 endpoints (6 of 6 VIPs on healthy CNodes)\n" {
 		t.Errorf("target add: %q", got)
 	}
+	// TLS needs something to verify against, or to be told not to verify:
+	// Envoy cannot be pointed at "the host's trust store".
+	if _, err := run(t, "dv", "target", "add", "s3tls", "--api", api, "--cluster", "lab", "--pool", "main", "--port", "443", "--listen-port", "9443",
+		"--tls", "--tls-server-name", "s3.example.com"); err == nil || !strings.Contains(err.Error(), "CA bundle") || !strings.Contains(err.Error(), "/etc/pki/tls/certs/ca-bundle.crt") {
+		t.Errorf("target add --tls with nothing to verify against: %v", err)
+	}
 	got = mustRun(t, "target", "add", "s3tls", "--api", api, "--cluster", "lab", "--pool", "main", "--port", "443", "--listen-port", "9443",
-		"--tls", "--tls-server-name", "s3.example.com")
+		"--tls", "--tls-server-name", "s3.example.com", "--tls-ca-file", "/etc/pki/tls/certs/ca-bundle.crt")
 	if !strings.Contains(got, "added s3tls: 127.0.0.1:9443") {
 		t.Errorf("target add --tls: %q", got)
 	}
@@ -320,4 +327,23 @@ func TestNoPlaceholderCommands(t *testing.T) {
 		}
 	}
 	walk(NewRoot("deltav"))
+}
+
+// A target's status says when its requests are getting no answer from VAST,
+// and why: the one place an operator is told that a certificate could not
+// be verified.
+func TestTargetStatusSaysWhyThereIsNoAnswer(t *testing.T) {
+	row := targetRow{Name: "s3"}
+	if got := row.status(); got != "static" {
+		t.Errorf("a static target: %q", got)
+	}
+	row.NoAnswer = &apiclient.NoAnswer{Client: "host-7", LastMinute: 412, Reason: "VAST's certificate does not chain to the target's CA file (CERTIFICATE_VERIFY_FAILED)"}
+	want := "static; NO ANSWER FROM VAST for 412 requests in the last minute: VAST's certificate does not chain to the target's CA file (CERTIFICATE_VERIFY_FAILED)"
+	if got := row.status(); got != want {
+		t.Errorf("status:\n got %q\nwant %q", got, want)
+	}
+	row.NoAnswer.LastMinute = 0
+	if got := row.status(); got != "static; NO ANSWER FROM VAST: VAST's certificate does not chain to the target's CA file (CERTIFICATE_VERIFY_FAILED)" {
+		t.Errorf("with none in the last minute: %q", got)
+	}
 }

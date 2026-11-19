@@ -186,6 +186,29 @@ type TargetInfo struct {
 	Endpoints  []Endpoint    `json:"endpoints"`
 	Status     *TargetStatus `json:"status"`
 	Over       []Usage       `json:"over"`
+	// NoAnswer is set while Envoys are answering this target's requests
+	// themselves because VAST gives no answer.
+	NoAnswer *NoAnswer `json:"no_answer"`
+}
+
+// NoAnswer says why a target's requests are getting an Envoy's 5xx in place
+// of an answer from VAST: the latest such request, and how many there were
+// in the last minute.
+type NoAnswer struct {
+	At         time.Time `json:"at"`
+	Client     string    `json:"client"`
+	Endpoint   string    `json:"endpoint"`
+	Reason     string    `json:"reason"`
+	LastMinute uint64    `json:"last_minute"`
+}
+
+// Sentence is NoAnswer in words.
+func (n *NoAnswer) Sentence() string {
+	s := "NO ANSWER FROM VAST"
+	if n.LastMinute > 0 {
+		s += fmt.Sprintf(" for %d requests in the last minute", n.LastMinute)
+	}
+	return s + ": " + n.Reason
 }
 
 type Cluster struct {

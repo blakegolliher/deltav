@@ -290,7 +290,7 @@
         <legend>TLS to the VIPs</legend>
         <label class="check"><input type="checkbox" name="tls" value="true"{{if .NewTarget.TLS}} checked{{end}}><span>Connect to the VIPs over TLS</span></label>
         <label class="field"><span>Server name</span><input class="input" name="server_name" value="{{with .NewTarget.TLS}}{{.ServerName}}{{end}}" autocomplete="off" spellcheck="false"><small>Sent as SNI and checked against the certificate. Needed with TLS.</small></label>
-        <label class="field"><span>CA bundle path on the clients <em>(optional)</em></span><input class="input" name="ca_file" value="{{with .NewTarget.TLS}}{{.CAFile}}{{end}}" autocomplete="off" spellcheck="false"><small>Default: each client host's own trust store.</small></label>
+        <label class="field"><span>CA bundle path on the clients</span><input class="input" name="ca_file" value="{{with .NewTarget.TLS}}{{.CAFile}}{{end}}" autocomplete="off" spellcheck="false"><small>The certificate must chain to it. Needed unless verification is off; a host's own bundle is usually /etc/ssl/certs/ca-certificates.crt or /etc/pki/tls/certs/ca-bundle.crt.</small></label>
         <label class="check"><input type="checkbox" name="tls_insecure" value="true"{{with .NewTarget.TLS}}{{if .Insecure}} checked{{end}}{{end}}><span>Do not verify the certificate (lab use)</span></label>
       </fieldset>
       <div class="form-end"><button class="btn btn-main">Add target</button></div>

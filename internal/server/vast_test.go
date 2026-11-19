@@ -484,6 +484,70 @@ func TestBucketHostNamesComeFromTheCluster(t *testing.T) {
 	}
 }
 
+// A TLS target must say what to verify VAST's certificate against. One
+// stored by an earlier build, which let it be left out, would be refused by
+// every Envoy and take the whole update with it; it is left out of what is
+// served, says why, and costs the other targets nothing.
+func TestTLSTargetWithNothingToVerifyAgainst(t *testing.T) {
+	m := mockVAST(t)
+	dir := t.TempDir()
+	s, stop := run(t, dir)
+	addCluster(t, s, m)
+	addTarget(t, s, "plain", "main", 9000)
+	tls := func(setting map[string]any) (int, string) {
+		return call(t, s, "POST", "/api/v1/targets", map[string]any{"name": "secure", "cluster": "lab", "pool": "main", "port": 443, "listen_port": 9443, "tls": setting})
+	}
+	if code, body := tls(map[string]any{"server_name": "s3.example.com"}); code != 400 || !strings.Contains(body, "CA bundle") || !strings.Contains(body, "/etc/ssl/certs/ca-certificates.crt") {
+		t.Errorf("a TLS target with no CA file and verification on: %d %s", code, body)
+	}
+	if code, body := tls(map[string]any{"ca_file": "/etc/deltav/ca.pem"}); code != 400 || !strings.Contains(body, "server name") {
+		t.Errorf("a TLS target with no server name: %d %s", code, body)
+	}
+	if code, body := tls(map[string]any{"server_name": "s3.example.com", "insecure": true}); code != 200 && code != 201 {
+		t.Fatalf("a TLS target with verification off: %d %s", code, body)
+	}
+	stop()
+
+	// As an earlier build would have stored it: no CA file, not insecure.
+	path := filepath.Join(dir, "state.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(raw), `"insecure": true`, `"insecure": false`, -1)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(edited), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, tg := range doc["targets"].([]any) {
+		if tg := tg.(map[string]any); tg["name"] == "secure" {
+			tg["tls"] = map[string]any{"server_name": "s3.example.com"}
+		}
+	}
+	for _, c := range doc["clusters"].([]any) {
+		c.(map[string]any)["insecure"] = true // the mock VAST's own certificate
+	}
+	out, _ := json.Marshal(doc)
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, _ := run(t, dir)
+	s2.poller.pollOnce(context.Background())
+	if tj := target(t, s2, "plain"); len(tj.Endpoints) != 6 || tj.Status.Problem != "" {
+		t.Errorf("the plain target: %d endpoints, status %+v", len(tj.Endpoints), tj.Status)
+	}
+	tj := target(t, s2, "secure")
+	if len(tj.Endpoints) != 0 || tj.Status == nil || !strings.Contains(tj.Status.Problem, "not served") || !strings.Contains(tj.Status.Problem, "CA bundle") {
+		t.Errorf("the TLS target stored without a CA file: %d endpoints, status %+v", len(tj.Endpoints), tj.Status)
+	}
+	for _, spec := range s2.XDS().Targets() {
+		if spec.Name == "secure" {
+			t.Error("the TLS target with nothing to verify against is served to Envoys")
+		}
+	}
+}
+
 // A restarted daemon serves its targets at once, with the endpoints it had,
 // even if VAST cannot be reached: Envoys that reconnect must not be handed
 // a config with their targets missing.

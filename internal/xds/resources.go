@@ -60,11 +60,30 @@ type Endpoint struct {
 	CNode string
 }
 
-// TLSSpec configures upstream TLS. Verification is on unless Insecure.
+// TLSSpec configures upstream TLS. Verification is on unless Insecure, and
+// then needs CAFile: Envoy has no way to say "the host's own trust store"
+// (the API has a field for it, system_root_certs, which Envoy 1.40 does not
+// implement: it rejects a cluster that verifies names without a CA).
 type TLSSpec struct {
 	ServerName string // SNI and the name the certificate must match
-	CAFile     string // CA bundle path on the client host; "" uses the host's trust store
+	CAFile     string // CA bundle path on the client host
 	Insecure   bool   // lab opt-out: no certificate verification
+}
+
+// CABundlePaths says where a host's own CA bundle usually is, for messages
+// to someone who has to name one.
+const CABundlePaths = "/etc/ssl/certs/ca-certificates.crt on Debian and Ubuntu, /etc/pki/tls/certs/ca-bundle.crt on RHEL and Fedora"
+
+// Validate reports what is missing from a TLS setting, in words for an
+// operator.
+func (s *TLSSpec) Validate() error {
+	switch {
+	case s.ServerName == "":
+		return fmt.Errorf("TLS needs a server name: Envoy would otherwise send the loopback address as SNI")
+	case !s.Insecure && s.CAFile == "":
+		return fmt.Errorf("TLS needs the path of a CA bundle on the client hosts to verify the certificate against (the host's own is at %s), or verification switched off", CABundlePaths)
+	}
+	return nil
 }
 
 // HealthCheckSpec is the active health check; zero values take defaults.
@@ -336,26 +355,21 @@ func (t TargetSpec) cluster() (*clusterv3.Cluster, error) {
 }
 
 func (s *TLSSpec) transportSocket() (*corev3.TransportSocket, error) {
-	if s.ServerName == "" {
-		return nil, fmt.Errorf("upstream TLS needs a server name (SNI); auto SNI would send 127.0.0.1")
+	if err := s.Validate(); err != nil {
+		return nil, err
 	}
 	common := &tlsv3.CommonTlsContext{}
 	if !s.Insecure {
-		vc := &tlsv3.CertificateValidationContext{
+		// The certificate must chain to the CA file and be for the server
+		// name. An exact DNS matcher follows DNS rules in Envoy: a wildcard
+		// in the certificate covers one label.
+		common.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContext{ValidationContext: &tlsv3.CertificateValidationContext{
 			MatchTypedSubjectAltNames: []*tlsv3.SubjectAltNameMatcher{{
 				SanType: tlsv3.SubjectAltNameMatcher_DNS,
 				Matcher: &matcherv3.StringMatcher{MatchPattern: &matcherv3.StringMatcher_Exact{Exact: s.ServerName}},
 			}},
-		}
-		if s.CAFile != "" {
-			vc.TrustedCa = &corev3.DataSource{Specifier: &corev3.DataSource_Filename{Filename: s.CAFile}}
-		} else {
-			// No one bundle path is right for every distribution (Debian's
-			// ca-certificates.crt does not exist on RHEL), so let Envoy use
-			// the host's default trust store.
-			vc.SystemRootCerts = &tlsv3.CertificateValidationContext_SystemRootCerts{}
-		}
-		common.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContext{ValidationContext: vc}
+			TrustedCa: &corev3.DataSource{Specifier: &corev3.DataSource_Filename{Filename: s.CAFile}},
+		}}
 	}
 	cfg, err := toAny(&tlsv3.UpstreamTlsContext{Sni: s.ServerName, CommonTlsContext: common})
 	if err != nil {

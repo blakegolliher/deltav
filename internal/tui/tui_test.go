@@ -512,6 +512,14 @@ func TestControlsView(t *testing.T) {
 	m.clusters[0].LastError = "status 500"
 	m.targets[0].Status = &TargetStatus{Problem: `cluster "lab" has no VIP pool "main"`, Held: true}
 	expect(t, screen(m), "failing: status 500", `serving the last known endpoints: cluster "lab" has no VIP pool "main"`)
+
+	// A target whose requests get no answer from VAST says so, and why:
+	// in the row, and in full under the table.
+	m.targets[1].NoAnswer = &apiclient.NoAnswer{Client: "host-7", Endpoint: "192.0.2.9:443", LastMinute: 412,
+		Reason: "VAST's certificate is not for the target's server name; it is for *.example.net (CERTIFICATE_VERIFY_FAILED)"}
+	expect(t, screen(m), "no answer from VAST",
+		"fixed: NO ANSWER FROM VAST for 412 requests in the last minute: VAST's certificate is not for the target's server name; it is for *.example.net",
+		"Last seen on host-7.")
 }
 
 func TestControlsActions(t *testing.T) {

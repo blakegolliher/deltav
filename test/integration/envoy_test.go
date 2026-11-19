@@ -69,6 +69,13 @@ func backends(t *testing.T, n int) ([]xds.Endpoint, []*lab.FakeS3) {
 // 127.0.0.1 is usable they fall back to distinct ports.
 func backendsWith(t *testing.T, cfgs ...lab.FakeS3Config) ([]xds.Endpoint, []*lab.FakeS3) {
 	t.Helper()
+	return backendsOn(t, nil, cfgs...)
+}
+
+// backendsOn is backendsWith, with each listener passed through wrap if it
+// is given: for backends that speak TLS.
+func backendsOn(t *testing.T, wrap func(net.Listener) net.Listener, cfgs ...lab.FakeS3Config) ([]xds.Endpoint, []*lab.FakeS3) {
+	t.Helper()
 	n := len(cfgs)
 	var lns []net.Listener
 	first, err := net.Listen("tcp", "127.0.0.11:0")
@@ -101,7 +108,11 @@ func backendsWith(t *testing.T, cfgs ...lab.FakeS3Config) ([]xds.Endpoint, []*la
 		cfg := cfgs[i]
 		cfg.Name, cfg.Keys = addr.String(), map[string]string{creds.AccessKey: creds.SecretKey}
 		f := lab.NewFakeS3(cfg)
-		go func() { _ = f.Serve(ctx, ln) }()
+		serving := ln
+		if wrap != nil {
+			serving = wrap(ln)
+		}
+		go func() { _ = f.Serve(ctx, serving) }()
 		eps = append(eps, xds.Endpoint{IP: addr.IP.String(), Port: uint32(addr.Port)})
 		fakes = append(fakes, f)
 	}

@@ -102,6 +102,7 @@
             {{else if .Status.Drained}}<span class="sub">{{badge "paused" "Drained"}} {{count .Status.Drained}} withheld</span>{{end}}
             {{if .Status.Unusable}}<span class="sub">{{badge "warn" "Left out"}} {{count .Status.Unusable}}: VAST gave no usable address</span>{{end}}
           {{else}}{{count .Endpoints}}{{end}}
+          {{with .NoAnswer}}<span class="sub">{{badge "crit" "No answer"}} {{if .LastMinute}}{{count .LastMinute}} in the last minute. {{end}}{{.Reason}}</span>{{end}}
         </td>
         {{template "stat-cells" .}}
         <td>

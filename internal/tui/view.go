@@ -523,6 +523,12 @@ func (m *Model) controlsView() ([]string, int) {
 					}
 				}
 			}
+			if n := t.NoAnswer; n != nil {
+				// Said below the table as well: the reason is long, and a
+				// narrow terminal leaves the STATUS column out.
+				status = styleBad.Render("no answer from VAST")
+				caveats = append(caveats, fmt.Sprintf("%s: %s. Last seen on %s.", t.Name, n.Sentence(), n.Client))
+			}
 			rows = append(rows, []string{t.Name, fmt.Sprintf("127.0.0.1:%d", t.ListenPort), from, tls, fmt.Sprint(len(t.Endpoints)), limit, status})
 		}
 		selected := -1

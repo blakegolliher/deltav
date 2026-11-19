@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -54,5 +55,59 @@ func TestSampleFrom(t *testing.T) {
 	running := &accesslogdatav3.HTTPAccessLogEntry{CommonProperties: &accesslogdatav3.AccessLogCommon{IntermediateLogEntry: true}}
 	if _, ok := sampleFrom(running, "x"); ok {
 		t.Error("an intermediate entry was counted as a finished request")
+	}
+}
+
+// A 5xx that Envoy made up because the target gave no answer is told apart
+// from one the target sent, and comes with a reason. The TLS wordings are
+// what Envoy 1.40.2 put in its access log for each case, copied from a run.
+func TestFailureFrom(t *testing.T) {
+	entry := func(status uint32, details, transport string, flags *accesslogdatav3.ResponseFlags) *accesslogdatav3.HTTPAccessLogEntry {
+		return &accesslogdatav3.HTTPAccessLogEntry{
+			CommonProperties: &accesslogdatav3.AccessLogCommon{UpstreamCluster: "s3", ResponseFlags: flags, UpstreamTransportFailureReason: transport},
+			Response:         &accesslogdatav3.HTTPResponseProperties{ResponseCode: wrapperspb.UInt32(status), ResponseCodeDetails: details},
+		}
+	}
+	const reset = "upstream_reset_before_response_started{remote_connection_failure}"
+	uf := &accesslogdatav3.ResponseFlags{UpstreamConnectionFailure: true}
+	for _, c := range []struct {
+		what string
+		e    *accesslogdatav3.HTTPAccessLogEntry
+		want string // "" if it is not a failure
+	}{
+		{"VAST's own 503", entry(503, "via_upstream", "", nil), ""},
+		{"VAST's own 200", entry(200, "via_upstream", "", nil), ""},
+		{"an Envoy that does not say where the response came from", entry(503, "", "", uf), ""},
+		{"over the connection limit: Envoy's doing, and meant", entry(503, "overflow", "", &accesslogdatav3.ResponseFlags{UpstreamOverflow: true}), ""},
+		{"over a rate rule: likewise", entry(503, "rate_limited_by_quota", "", nil), ""},
+		{"a malformed request Envoy turned away", entry(400, "http1.codec_error", "", nil), ""},
+		{"a certificate for other names", entry(503, reset,
+			"TLS_error:|268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED:verify cert failed: SAN matcher, certificate SANs are [s3.lab.example, *.pools.lab.example]:TLS_error_end", uf),
+			"VAST's certificate is not for the target's server name; it is for s3.lab.example, *.pools.lab.example (268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED:verify cert failed: SAN matcher, certificate SANs are [s3.lab.example, *.pools.lab.example])"},
+		{"a certificate from another authority", entry(503, reset,
+			"TLS_error:|268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED:verify cert failed: X509_verify_cert: certificate verification error at depth 0: unable to get local issuer certificate:TLS_error_end", uf),
+			"VAST's certificate does not chain to the target's CA file (268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED:verify cert failed: X509_verify_cert: certificate verification error at depth 0: unable to get local issuer certificate)"},
+		{"some other TLS failure", entry(503, reset, "TLS_error:|268435703:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER:TLS_error_end", uf),
+			"the TLS handshake failed (268435703:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER)"},
+		{"nothing listening", entry(503, reset, "", uf), "could not connect (" + reset + ")"},
+		{"every endpoint failing its health check", entry(503, "no_healthy_upstream", "", &accesslogdatav3.ResponseFlags{NoHealthyUpstream: true}), "no endpoint is passing its health check (no_healthy_upstream)"},
+		{"no answer in time", entry(504, "upstream_response_timeout", "", &accesslogdatav3.ResponseFlags{UpstreamRequestTimeout: true}), "no answer in time (upstream_response_timeout)"},
+		{"closed before an answer", entry(503, "upstream_reset_before_response_started{connection_termination}", "", &accesslogdatav3.ResponseFlags{UpstreamConnectionTermination: true}),
+			"the connection was closed before an answer (upstream_reset_before_response_started{connection_termination})"},
+		{"something this does not know", entry(500, "something_new", "", nil), "Envoy answered in the target's place (something_new)"},
+	} {
+		sample, _ := sampleFrom(c.e, "s3")
+		got, ok := failureFrom(c.e, "client-1", sample)
+		switch {
+		case c.want == "" && ok:
+			t.Errorf("%s: taken for a failure: %q", c.what, got.Reason)
+		case c.want != "" && (!ok || got.Reason != c.want || got.Client != "client-1" || got.Target != "s3"):
+			t.Errorf("%s:\n got %+v (failure: %v)\nwant reason %q", c.what, got, ok, c.want)
+		}
+	}
+	long := entry(503, reset, "TLS_error:|"+strings.Repeat("x", 5000)+":TLS_error_end", uf)
+	sample, _ := sampleFrom(long, "s3")
+	if got, _ := failureFrom(long, "c", sample); len(got.Reason) > 400 {
+		t.Errorf("a reason of %d bytes was kept whole", len(got.Reason))
 	}
 }

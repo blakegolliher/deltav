@@ -66,10 +66,11 @@ func (v *view) readParams(in url.Values) {
 
 type overviewTarget struct {
 	apiclient.Target
-	Source  string
-	Cluster string
-	Pool    string
-	Status  *apiclient.TargetStatus
+	Source   string
+	Cluster  string
+	Pool     string
+	Status   *apiclient.TargetStatus
+	NoAnswer *apiclient.NoAnswer
 }
 
 type overviewView struct {
@@ -106,7 +107,7 @@ func (u *UI) buildOverview(ctx context.Context, v *view) error {
 	for _, t := range o.Targets {
 		row := overviewTarget{Target: t}
 		if info, ok := byName[t.Name]; ok {
-			row.Source, row.Cluster, row.Pool, row.Status = info.Source, info.Cluster, info.Pool, info.Status
+			row.Source, row.Cluster, row.Pool, row.Status, row.NoAnswer = info.Source, info.Cluster, info.Pool, info.Status, info.NoAnswer
 		}
 		ov.Targets = append(ov.Targets, row)
 		ov.RequestRate += t.Stats.RequestRate

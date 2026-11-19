@@ -32,7 +32,11 @@ type Cluster struct {
 	Insecure bool `json:"insecure,omitempty"`
 }
 
-// TLS is a target's upstream TLS setting.
+// caBundlePaths says where a host's own CA bundle usually is.
+const caBundlePaths = "/etc/ssl/certs/ca-certificates.crt on Debian and Ubuntu, /etc/pki/tls/certs/ca-bundle.crt on RHEL and Fedora"
+
+// TLS is a target's upstream TLS setting. Verification needs CAFile, a path
+// on the client hosts, unless Insecure.
 type TLS struct {
 	ServerName string `json:"server_name"`
 	CAFile     string `json:"ca_file,omitempty"`
@@ -287,6 +291,11 @@ func (s *Store) AddTarget(t Target, reserved map[uint32]string) error {
 		return fmt.Errorf("%w: port and listen port must be 1-65535", ErrInvalid)
 	case t.TLS != nil && t.TLS.ServerName == "":
 		return fmt.Errorf("%w: a TLS target needs a server name: Envoy would otherwise send the loopback address as SNI", ErrInvalid)
+	case t.TLS != nil && !t.TLS.Insecure && t.TLS.CAFile == "":
+		// Envoy cannot be told to use "the host's trust store"; a target
+		// stored without a file would be rejected by every Envoy.
+		return fmt.Errorf("%w: a TLS target needs the path of a CA bundle on the client hosts to verify the certificate against (a host's own is at %s), or verification switched off",
+			ErrInvalid, caBundlePaths)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

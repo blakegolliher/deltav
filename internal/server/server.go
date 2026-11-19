@@ -95,6 +95,7 @@ type Server struct {
 	store     *state.Store
 	poller    *poller
 	quota     *ratelimit.Server
+	failures  *failures  // requests Envoys answered for want of the target's answer
 	rulesMu   sync.Mutex // held across a change to the rules and its undoing
 
 	staticMu sync.RWMutex
@@ -170,6 +171,8 @@ func New(cfg Config) (*Server, error) {
 	// reach the daemon in the access log like any other request; the quota
 	// service keeps the record of them.
 	s.telemetry.OnRefusals(s.quota.Refusals)
+	s.failures = newFailures()
+	s.telemetry.OnFailures(s.failures.record)
 	s.poller = newPoller(s, cfg.VASTPollInterval)
 	// Before any Envoy can connect: serve the VAST targets with the
 	// endpoints they had at the last shutdown. An Envoy that reconnects to

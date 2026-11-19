@@ -252,30 +252,37 @@ func TestClusterTLS(t *testing.T) {
 		return ctx
 	}
 
-	t.Run("system trust store", func(t *testing.T) {
-		ctx := tlsContext(t, &TLSSpec{ServerName: "s3.example.com"})
+	// Verification with no CA file cannot be served. Envoy has a field for
+	// "the host's trust store" (system_root_certs) and does not implement
+	// it: real Envoy 1.40 rejects such a cluster, and with it the update.
+	t.Run("no CA file", func(t *testing.T) {
+		spec := testTarget()
+		spec.TLS = &TLSSpec{ServerName: "s3.example.com"}
+		if _, err := spec.Resources(); err == nil || !strings.Contains(err.Error(), "CA bundle") {
+			t.Errorf("want an error that asks for a CA bundle, got %v", err)
+		}
+	})
+	t.Run("CA file", func(t *testing.T) {
+		ctx := tlsContext(t, &TLSSpec{ServerName: "s3.example.com", CAFile: "/etc/deltav/ca.pem"})
 		vc := ctx.GetCommonTlsContext().GetValidationContext()
 		if ctx.GetSni() != "s3.example.com" {
 			t.Errorf("sni = %q", ctx.GetSni())
 		}
-		if vc.GetSystemRootCerts() == nil || vc.GetTrustedCa() != nil {
-			t.Error("with no CA file, the host's trust store must be used")
+		if vc.GetTrustedCa().GetFilename() != "/etc/deltav/ca.pem" || vc.GetSystemRootCerts() != nil {
+			t.Errorf("validation context = %v", vc)
 		}
 		sans := vc.GetMatchTypedSubjectAltNames()
 		if len(sans) != 1 || sans[0].GetMatcher().GetExact() != "s3.example.com" {
 			t.Errorf("certificate name is not pinned to the server name: %v", sans)
 		}
 	})
-	t.Run("CA file", func(t *testing.T) {
-		vc := tlsContext(t, &TLSSpec{ServerName: "s3.example.com", CAFile: "/etc/deltav/ca.pem"}).GetCommonTlsContext().GetValidationContext()
-		if vc.GetTrustedCa().GetFilename() != "/etc/deltav/ca.pem" || vc.GetSystemRootCerts() != nil {
-			t.Errorf("validation context = %v", vc)
-		}
-	})
 	t.Run("insecure", func(t *testing.T) {
 		ctx := tlsContext(t, &TLSSpec{ServerName: "s3.example.com", Insecure: true})
 		if ctx.GetCommonTlsContext().GetValidationContext() != nil {
 			t.Error("insecure target still has a validation context")
+		}
+		if ctx.GetSni() != "s3.example.com" {
+			t.Errorf("sni = %q", ctx.GetSni())
 		}
 	})
 	t.Run("server name required", func(t *testing.T) {

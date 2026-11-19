@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -37,7 +38,10 @@ type Server struct {
 
 	agg *metrics.Aggregator
 	// refused, if set, is told of every request a rate rule refused.
-	refused  func([]ratelimit.Refusal)
+	refused func([]ratelimit.Refusal)
+	// failed, if set, is told of every request an Envoy answered because
+	// the target did not.
+	failed   func([]Failure)
 	log      *slog.Logger
 	interval time.Duration
 	ignore   map[string]bool // cluster names that are not targets
@@ -63,6 +67,22 @@ func New(agg *metrics.Aggregator, log *slog.Logger, loadReportInterval time.Dura
 // OnRefusals sets who is told of the requests rate rules refuse, a batch at
 // a time as Envoys log them. Call it before the services take streams.
 func (s *Server) OnRefusals(f func([]ratelimit.Refusal)) { s.refused = f }
+
+// Failure is one request that an Envoy answered itself because the target
+// gave it no answer: it could not connect, the TLS handshake failed, the
+// connection broke before a response, or the wait ran out. The client got
+// a 5xx that VAST never sent.
+type Failure struct {
+	At       time.Time `json:"at"`
+	Client   string    `json:"client"`             // the Envoy: its client host
+	Target   string    `json:"target"`             //
+	Endpoint string    `json:"endpoint,omitempty"` // the VIP it tried, if it got as far as choosing one
+	Reason   string    `json:"reason"`             // in words; see reasonFor
+}
+
+// OnFailures sets who is told of such requests, a batch at a time. Call it
+// before the services take streams.
+func (s *Server) OnFailures(f func([]Failure)) { s.failed = f }
 
 // Register adds both services to a gRPC server.
 func (s *Server) Register(g *grpc.Server) {
@@ -98,6 +118,7 @@ func (s *Server) StreamAccessLogs(stream accesslogv3.AccessLogService_StreamAcce
 		}
 		batch := make([]metrics.Sample, 0, len(entries))
 		var refused []ratelimit.Refusal
+		var failed []Failure
 		for _, e := range entries {
 			sample, ok := sampleFrom(e, logName)
 			if !ok {
@@ -107,11 +128,19 @@ func (s *Server) StreamAccessLogs(stream accesslogv3.AccessLogService_StreamAcce
 			if sample.Refused && s.refused != nil {
 				refused = append(refused, refusalFrom(e, node, sample))
 			}
+			if s.failed != nil {
+				if f, ok := failureFrom(e, node, sample); ok {
+					failed = append(failed, f)
+				}
+			}
 		}
 		s.agg.Record(node, batch)
 		s.entries.Add(uint64(len(batch)))
 		if len(refused) > 0 {
 			s.refused(refused)
+		}
+		if len(failed) > 0 {
+			s.failed(failed)
 		}
 	}
 }
@@ -173,6 +202,63 @@ func refusalFrom(e *accesslogdatav3.HTTPAccessLogEntry, node string, s metrics.S
 		r.Rules = []string{}
 	}
 	return r
+}
+
+// viaUpstream is the response code details Envoy gives a response that the
+// upstream sent. Anything else is Envoy's own.
+const viaUpstream = "via_upstream"
+
+// failureFrom reports whether a request got Envoy's answer for want of the
+// target's, and why. Refusals by rate rules and by the connection limit are
+// Envoy's answers too, but deliberate ones, counted elsewhere.
+func failureFrom(e *accesslogdatav3.HTTPAccessLogEntry, node string, s metrics.Sample) (Failure, bool) {
+	details := e.GetResponse().GetResponseCodeDetails()
+	if s.Refused || s.Overflow || s.Status < 500 || details == "" || details == viaUpstream {
+		return Failure{}, false
+	}
+	c := e.GetCommonProperties()
+	f := Failure{Client: node, Target: s.Target, Endpoint: s.Endpoint, Reason: reasonFor(details, c.GetUpstreamTransportFailureReason(), c.GetResponseFlags())}
+	if t := c.GetStartTime(); t != nil {
+		f.At = t.AsTime()
+	}
+	return f, true
+}
+
+// sansRE finds the names Envoy 1.40 says a certificate is for, when it has
+// rejected the certificate for not being for the name asked.
+var sansRE = regexp.MustCompile(`SAN matcher, certificate SANs are \[([^\]]*)\]`)
+
+// reasonFor puts what Envoy recorded of a failure into a sentence. What
+// Envoy recorded is kept at the end, cut short: it is the thing to search
+// for. The wording of TLS failures is Envoy 1.40's, as seen.
+func reasonFor(details, transport string, flags *accesslogdatav3.ResponseFlags) string {
+	raw := details
+	if transport != "" {
+		raw = strings.TrimSuffix(strings.TrimPrefix(transport, "TLS_error:|"), ":TLS_error_end")
+	}
+	if len(raw) > 300 {
+		raw = raw[:300] + "..."
+	}
+	var what string
+	switch {
+	case sansRE.MatchString(transport):
+		what = "VAST's certificate is not for the target's server name; it is for " + sansRE.FindStringSubmatch(transport)[1]
+	case strings.Contains(transport, "CERTIFICATE_VERIFY_FAILED"):
+		what = "VAST's certificate does not chain to the target's CA file"
+	case transport != "":
+		what = "the TLS handshake failed"
+	case flags.GetNoHealthyUpstream():
+		what = "no endpoint is passing its health check"
+	case flags.GetUpstreamRequestTimeout():
+		what = "no answer in time"
+	case flags.GetUpstreamConnectionFailure():
+		what = "could not connect"
+	case flags.GetUpstreamConnectionTermination(), flags.GetUpstreamRemoteReset():
+		what = "the connection was closed before an answer"
+	default:
+		what = "Envoy answered in the target's place"
+	}
+	return what + " (" + raw + ")"
 }
 
 func hostPort(a *corev3.Address) string {
