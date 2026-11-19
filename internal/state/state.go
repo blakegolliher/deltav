@@ -488,11 +488,13 @@ func (s *Store) SetDrained(cluster, cnode string, drained bool) error {
 }
 
 // Cache is what a restarted daemon needs in order to serve Envoys exactly
-// what they were being served: each target's endpoints and, for a target
-// with an enforced limit, the per-Envoy share.
+// what they were being served: each target's endpoints, for a target with
+// an enforced limit the per-Envoy share, and the host names under which the
+// target's cluster reads a bucket from the host name.
 type Cache struct {
-	Endpoints map[string][]Endpoint `json:"endpoints"`
-	Shares    map[string]uint32     `json:"shares,omitempty"`
+	Endpoints map[string][]Endpoint      `json:"endpoints"`
+	Shares    map[string]uint32          `json:"shares,omitempty"`
+	Hosts     map[string]ratelimit.Hosts `json:"hosts,omitempty"`
 }
 
 // LoadCache returns the cache; an absent or unreadable one is empty.

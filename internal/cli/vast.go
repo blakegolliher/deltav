@@ -248,6 +248,8 @@ type targetRow struct {
 		Problem  string
 		Held     bool
 		Limit    *limitStatus
+		// Why rate rules cannot see a bucket named in a host name.
+		BucketHostsProblem string `json:"bucket_hosts_problem"`
 	}
 	Over []struct {
 		CNode    string
@@ -285,6 +287,9 @@ func (t targetRow) status() string {
 	}
 	if t.Status.Unusable > 0 {
 		s += fmt.Sprintf(", %d left out: VAST gave no usable address", t.Status.Unusable)
+	}
+	if t.Status.BucketHostsProblem != "" {
+		s += "; rate rules cannot see a bucket named in a host name: " + t.Status.BucketHostsProblem
 	}
 	for _, o := range t.Over {
 		s += fmt.Sprintf("; OVER THE LIMIT on %s (%d in flight)", o.CNode, o.InFlight)

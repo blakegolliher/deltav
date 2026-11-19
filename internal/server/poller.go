@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"deltav/internal/limit"
+	"deltav/internal/ratelimit"
 	"deltav/internal/state"
 	"deltav/internal/vast"
 	"deltav/internal/xds"
 )
 
 const (
-	// DefaultVASTPollInterval is how often each VAST cluster is read: three
+	// DefaultVASTPollInterval is how often each VAST cluster is read: four
 	// GETs per poll.
 	DefaultVASTPollInterval = 10 * time.Second
 	// emptyHold is how many polls in a row must find a target without
@@ -39,6 +40,28 @@ type clusterView struct {
 	CNodes []vast.CNode
 	Pools  []vast.VIPPool
 	VIPs   []vast.VIP
+	// DNS is the cluster's DNS settings, and DNSErr why the latest poll
+	// could not read them ("" if it could). They are read apart from the
+	// rest and their failure fails nothing: DNS then stays as last read.
+	DNS    []vast.DNS
+	DNSErr string
+}
+
+// hosts is where VAST would find a bucket in a host name: under the
+// cluster's DNS suffix, with or without a pool's own label before it.
+func (v *clusterView) hosts() ratelimit.Hosts {
+	var h ratelimit.Hosts
+	for _, d := range v.DNS {
+		if d.DomainSuffix != "" {
+			h.Suffixes = append(h.Suffixes, d.DomainSuffix)
+		}
+	}
+	for _, p := range v.Pools {
+		if p.DomainName != "" {
+			h.Pools = append(h.Pools, p.DomainName)
+		}
+	}
+	return h
 }
 
 // targetStatus says how a VAST target resolved at the last poll.
@@ -52,6 +75,13 @@ type targetStatus struct {
 	// that is not an IP address.
 	Unusable int    `json:"unusable,omitempty"`
 	Problem  string `json:"problem,omitempty"` // why it could not be resolved
+	// BucketHosts are the host names under which a request's bucket is
+	// read from its host name and not its path, as "*.<suffix>": rate
+	// rules read requests as VAST does. BucketHostsProblem says why they
+	// are not known, if the cluster's DNS settings could not be read; rules
+	// about buckets then miss requests that name the bucket in the host.
+	BucketHosts        []string `json:"bucket_hosts,omitempty"`
+	BucketHostsProblem string   `json:"bucket_hosts_problem,omitempty"`
 	// Held is true while the endpoints served are the last known ones and
 	// not what the latest poll said (or there has been no poll yet).
 	Held  bool         `json:"held,omitempty"`
@@ -105,9 +135,10 @@ type poller struct {
 	mu       sync.Mutex
 	apis     map[string]apiEntry
 	views    map[string]*clusterView
-	served   map[string][]xds.Endpoint // per VAST target: endpoints now served
-	empty    map[string]int            // per VAST target: polls in a row without endpoints
-	emptyAt  map[string]time.Time      // per VAST target: the poll last counted in empty
+	served   map[string][]xds.Endpoint  // per VAST target: endpoints now served
+	hosts    map[string]ratelimit.Hosts // per VAST target: where a bucket is in a host name
+	empty    map[string]int             // per VAST target: polls in a row without endpoints
+	emptyAt  map[string]time.Time       // per VAST target: the poll last counted in empty
 	status   map[string]targetStatus
 	debounce map[string]*limit.Debouncer // per VAST target: the enforced share
 	now      func() time.Time
@@ -124,7 +155,7 @@ func newPoller(s *Server, interval time.Duration) *poller {
 	p := &poller{
 		s: s, interval: interval, kick: make(chan struct{}, 1),
 		apis: map[string]apiEntry{}, views: map[string]*clusterView{},
-		served: map[string][]xds.Endpoint{}, empty: map[string]int{}, emptyAt: map[string]time.Time{}, status: map[string]targetStatus{},
+		served: map[string][]xds.Endpoint{}, hosts: map[string]ratelimit.Hosts{}, empty: map[string]int{}, emptyAt: map[string]time.Time{}, status: map[string]targetStatus{},
 		debounce: map[string]*limit.Debouncer{}, now: time.Now,
 		minChange: s.cfg.LimitMinChange, minInterval: s.cfg.LimitMinInterval,
 	}
@@ -150,6 +181,9 @@ func newPoller(s *Server, interval time.Duration) *poller {
 		for _, e := range eps {
 			p.served[name] = append(p.served[name], xds.Endpoint{IP: e.IP, Port: e.Port, CNode: e.CNode})
 		}
+	}
+	for name, h := range cache.Hosts {
+		p.hosts[name] = h
 	}
 	for name, share := range cache.Shares {
 		d := &limit.Debouncer{MinChange: p.minChange, MinInterval: p.minInterval}
@@ -196,7 +230,7 @@ func (p *poller) api(c state.Cluster) (vast.API, error) {
 	return api, nil
 }
 
-// fetch reads one cluster: its CNodes, pools and VIPs.
+// fetch reads one cluster: its CNodes, pools and VIPs, and its DNS settings.
 func fetch(ctx context.Context, api vast.API) (*clusterView, error) {
 	ctx, cancel := context.WithTimeout(ctx, pollTimeout)
 	defer cancel()
@@ -212,7 +246,13 @@ func fetch(ctx context.Context, api vast.API) (*clusterView, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &clusterView{CNodes: cnodes, Pools: pools, VIPs: vips}, nil
+	view := &clusterView{CNodes: cnodes, Pools: pools, VIPs: vips}
+	// Last, and not fatal: endpoints do not depend on it, and a user who
+	// may read pools may not be allowed to read this.
+	if view.DNS, err = api.ListDNS(ctx); err != nil {
+		view.DNS, view.DNSErr = nil, err.Error()
+	}
+	return view, nil
 }
 
 // pollOnce reads every cluster and applies the result.
@@ -237,6 +277,15 @@ func (p *poller) pollOnce(ctx context.Context) {
 		switch {
 		case err == nil:
 			view.At = now
+			if view.DNSErr != "" {
+				if old != nil {
+					view.DNS = old.DNS
+				}
+				if old == nil || old.DNSErr == "" {
+					p.s.log.Warn("cannot read the cluster's DNS settings; rate rules will not see a bucket named in a host name unless they were read before",
+						"cluster", c.Name, "error", view.DNSErr)
+				}
+			}
 			p.views[c.Name] = view
 			if old != nil && old.Err != "" {
 				p.s.log.Info("VAST cluster reachable again", "cluster", c.Name)
@@ -371,7 +420,11 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 			}
 			eps, st.Held = prev, true
 		default:
+			p.hosts[t.Name] = view.hosts()
 			eps, st = resolve(t, view, drained[t.Cluster])
+			if view.DNSErr != "" {
+				st.BucketHostsProblem = "the cluster's DNS settings could not be read: " + view.DNSErr
+			}
 			switch {
 			case len(eps) > 0:
 				p.empty[t.Name] = 0
@@ -392,7 +445,11 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 				}
 			}
 		}
-		spec := xds.TargetSpec{Name: t.Name, ListenPort: t.ListenPort, Endpoints: eps, AccessLog: true}
+		hosts := p.hosts[t.Name]
+		for _, suffix := range hosts.Suffixes {
+			st.BucketHosts = append(st.BucketHosts, "*."+strings.ToLower(strings.Trim(suffix, ".")))
+		}
+		spec := xds.TargetSpec{Name: t.Name, ListenPort: t.ListenPort, Endpoints: eps, AccessLog: true, S3Hosts: hosts}
 		if t.Limit != nil {
 			ls := &limitStatus{PerCNode: t.Limit.PerCNode, Mode: t.Limit.Mode, Envoys: envoys, Workers: max(workers, 1), Undeclared: undeclared, Holds: true}
 			perCNode := map[string]int{}
@@ -428,6 +485,11 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 			delete(p.served, name)
 		}
 	}
+	for name := range p.hosts {
+		if !known[name] {
+			delete(p.hosts, name)
+		}
+	}
 	for name := range p.status {
 		if !known[name] {
 			delete(p.status, name)
@@ -436,7 +498,12 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 			delete(p.debounce, name)
 		}
 	}
-	cache := state.Cache{Endpoints: make(map[string][]state.Endpoint, len(p.served)), Shares: map[string]uint32{}}
+	cache := state.Cache{Endpoints: make(map[string][]state.Endpoint, len(p.served)), Shares: map[string]uint32{}, Hosts: map[string]ratelimit.Hosts{}}
+	for name, h := range p.hosts {
+		if len(h.Suffixes) > 0 {
+			cache.Hosts[name] = h
+		}
+	}
 	for name, eps := range p.served {
 		for _, e := range eps {
 			cache.Endpoints[name] = append(cache.Endpoints[name], state.Endpoint{IP: e.IP, Port: e.Port, CNode: e.CNode})

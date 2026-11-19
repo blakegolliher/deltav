@@ -413,6 +413,77 @@ func TestUnusableVIPAddress(t *testing.T) {
 	}
 }
 
+// Rate rules read a request's bucket where VAST would: in the host name, if
+// that is under the cluster's DNS suffix. The daemon reads the suffix and
+// the pools' own labels from the cluster and hands them to the script. If it
+// cannot read the DNS settings, that fails nothing else, and it says so.
+func TestBucketHostNamesComeFromTheCluster(t *testing.T) {
+	m := mockVAST(t)
+	dir := t.TempDir()
+	s, stop := run(t, dir)
+	addCluster(t, s, m)
+	ctx := context.Background()
+	addTarget(t, s, "s3", "main", 9000)
+	if code, body := call(t, s, "PUT", "/api/v1/rules/no-archive", map[string]any{"bucket": []string{"archive"}, "blocked": true}); code != 200 {
+		t.Fatalf("setting a rule: %d %s", code, body)
+	}
+	names := func(s *Server) string {
+		t.Helper()
+		_, script, _ := served(t, s, "s3")
+		for _, line := range strings.Split(script, "\n") {
+			if strings.HasPrefix(line, "local SUFFIXES, POOLS = ") {
+				return strings.TrimPrefix(line, "local SUFFIXES, POOLS = ")
+			}
+		}
+		t.Fatal("the script does not say what host names it knows")
+		return ""
+	}
+	// The fixture's suffix, and its pools' labels: main among them.
+	got := names(s)
+	if !strings.HasPrefix(got, `{"dns1.example.com"}, {`) || !strings.Contains(got, `"main"`) || !strings.Contains(got, `"domain-1"`) {
+		t.Errorf("the script knows %s", got)
+	}
+	tj := target(t, s, "s3")
+	if len(tj.Status.BucketHosts) != 1 || tj.Status.BucketHosts[0] != "*.dns1.example.com" || tj.Status.BucketHostsProblem != "" {
+		t.Errorf("status: %+v", tj.Status)
+	}
+
+	// The suffix changes on the cluster: the script follows.
+	m.SetDNSSuffix("S3.Example.Net")
+	s.poller.pollOnce(ctx)
+	if got := names(s); !strings.HasPrefix(got, `{"s3.example.net"}, {`) {
+		t.Errorf("after the suffix changed, the script knows %s", got)
+	}
+
+	// The DNS settings can no longer be read. Endpoints are served as
+	// before, the names last read stay in force, and the target says why
+	// they may be out of date.
+	m.Forbid("dns", true)
+	before := len(tj.Endpoints)
+	s.poller.pollOnce(ctx)
+	tj = target(t, s, "s3")
+	if len(tj.Endpoints) != before || tj.Status.Problem != "" || tj.Status.Held {
+		t.Errorf("with DNS unreadable: %d endpoints (were %d), status %+v", len(tj.Endpoints), before, tj.Status)
+	}
+	if !strings.Contains(tj.Status.BucketHostsProblem, "DNS settings could not be read") || len(tj.Status.BucketHosts) != 1 {
+		t.Errorf("with DNS unreadable, status: %+v", tj.Status)
+	}
+	if got := names(s); !strings.HasPrefix(got, `{"s3.example.net"}, {`) {
+		t.Errorf("with DNS unreadable, the script knows %s", got)
+	}
+	if m.Mutating() != 0 {
+		t.Errorf("%d requests to VAST that were not GETs or token calls", m.Mutating())
+	}
+
+	// A restarted daemon that cannot reach VAST at all still knows them.
+	stop()
+	m.Close()
+	s2, _ := run(t, dir)
+	if got := names(s2); !strings.HasPrefix(got, `{"s3.example.net"}, {`) || !strings.Contains(got, `"main"`) {
+		t.Errorf("after a restart without VAST, the script knows %s", got)
+	}
+}
+
 // A restarted daemon serves its targets at once, with the endpoints it had,
 // even if VAST cannot be reached: Envoys that reconnect must not be handed
 // a config with their targets missing.

@@ -3,8 +3,10 @@
 package integration
 
 import (
+	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
@@ -462,5 +464,112 @@ func TestSlowRuleHoldsThroughAPause(t *testing.T) {
 	t.Logf("12 an hour, burst 3: %d passed, then after 40 s of silence %d; the count is still open on %d Envoy", first, second, st.Status.Envoys)
 	if st.Status.Keys != 1 {
 		t.Errorf("the count was given up during the pause: %+v", st)
+	}
+}
+
+// rawRequest writes one HTTP/1.1 request byte for byte and reads the answer.
+// net/http's client would tidy the target and the headers on the way out.
+func rawRequest(t *testing.T, port uint32, method, target, host string, headers [][2]string, body string) (int, string) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n", method, target, host)
+	for _, h := range headers {
+		fmt.Fprintf(&b, "%s: %s\r\n", h[0], h[1])
+	}
+	if body != "" {
+		fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
+	}
+	b.WriteString("\r\n")
+	b.WriteString(body)
+	if _, err := io.WriteString(conn, b.String()); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: method})
+	if err != nil {
+		return 0, "no answer: " + err.Error()
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, string(got)
+}
+
+// A rule works on the script's reading of a request. These are requests
+// that can be read two ways, sent through real Envoy with the script in it:
+// each must meet the rule that VAST's reading of it calls for. That this is
+// VAST's reading is what the live test establishes; this one needs no VAST.
+func TestOddRequestsMeetTheirRules(t *testing.T) {
+	s, _, _, _, port := vastTarget(t, lab.FakeS3Config{})
+	self := fmt.Sprintf("127.0.0.1:%d", port)
+	sendAPI(t, s, http.MethodPut, "/api/v1/rules/no-archive", map[string]any{"bucket": []string{"archive"}, "blocked": true})
+	sendAPI(t, s, http.MethodPut, "/api/v1/rules/by-key", map[string]any{"limit_per_second": 1000, "burst": 1000, "per": []string{"access_key"}})
+	waitMember(t, s, "it-envoy-1", "in sync with the rules", inSync)
+	time.Sleep(300 * time.Millisecond) // an ACK is Envoy's main thread; its workers follow
+
+	auth := func(key string) [2]string {
+		return [2]string{"Authorization", "AWS4-HMAC-SHA256 Credential=" + key + "/20261119/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=" + strings.Repeat("0", 64)}
+	}
+	// The mock cluster's DNS suffix is dns1.example.com and the target's
+	// pool is named main under it (testdata/vast).
+	refused := 0
+	for _, c := range []struct {
+		what, target, host string
+		headers            [][2]string
+		status             int // 0: whatever the backend answers, but not a refusal
+		code               string
+	}{
+		{"the bucket in the path", "/archive/k", self, nil, 503, "SlowDown"},
+		{"the slash after it encoded", "/archive%2Fk", self, nil, 503, "SlowDown"},
+		{"a letter of it encoded", "/arch%69ve/k", self, nil, 503, "SlowDown"},
+		{"the bucket in the host name, before the pool's", "/k", "archive.main.dns1.example.com", nil, 503, "SlowDown"},
+		{"before the suffix, with a port, in another case", "/k", "archive.DNS1.example.com:80", nil, 503, "SlowDown"},
+		{"the pool's own name, the bucket in the path", "/archive/k", "main.dns1.example.com", nil, 503, "SlowDown"},
+		{"another bucket in the host name, this one in the path", "/archive/k", "other.main.dns1.example.com", nil, 0, ""},
+		{"behind a second slash: no bucket at all", "//archive/k", self, nil, 0, ""},
+		{"another bucket", "/other/k", self, [][2]string{auth("AKIAONE")}, 0, ""},
+		{"two Authorization headers, two access keys", "/other/k", self, [][2]string{auth("AKIAONE"), auth("AKIATWO")}, 400, "InvalidRequest"},
+		{"a presigned URL and a header", "/other/k?X-Amz-Credential=AKIAONE%2F20261119&X-Amz-Signature=0", self, [][2]string{auth("AKIATWO")}, 400, "InvalidRequest"},
+		{"the same access key twice", "/other/k?X-Amz-Credential=AKIAONE%2F20261119&X-Amz-Signature=0", self, [][2]string{auth("AKIAONE")}, 0, ""},
+	} {
+		status, body := rawRequest(t, port, http.MethodGet, c.target, c.host, c.headers, "")
+		byRule := strings.Contains(body, "<Code>SlowDown</Code>") || strings.Contains(body, "The request names more than one access key")
+		switch {
+		case c.status == 0 && byRule:
+			t.Errorf("%s (GET %s, Host %s): refused, %d %s", c.what, c.target, c.host, status, body)
+		case c.status != 0 && (status != c.status || !strings.Contains(body, "<Code>"+c.code+"</Code>")):
+			t.Errorf("%s (GET %s, Host %s): %d %s; want %d %s", c.what, c.target, c.host, status, body, c.status, c.code)
+		}
+		if c.status != 0 {
+			refused++
+		}
+	}
+
+	// Refusals of both kinds are counted apart from the target's own
+	// answers, and the record says which was which.
+	var marked, blocked int
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		marked, blocked = 0, 0
+		for _, r := range refusals(t, s) {
+			switch {
+			case len(r.Rules) == 1 && r.Rules[0] == ratelimit.RefusedSeveralKeys && r.Status == 400:
+				marked++
+			case len(r.Rules) == 1 && r.Rules[0] == "no-archive" && r.Bucket == "archive":
+				blocked++
+			}
+		}
+		if (marked == 2 && blocked == 6 && targetNow(t, s).Refused == uint64(refused)) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if st := targetNow(t, s); marked != 2 || blocked != 6 || st.Refused != uint64(refused) {
+		t.Errorf("the record has %d refusals for several access keys and %d by the blocked rule, and the target counts %d refused; want 2, 6 and %d",
+			marked, blocked, st.Refused, refused)
 	}
 }

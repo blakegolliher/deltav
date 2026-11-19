@@ -46,6 +46,10 @@ type TargetSpec struct {
 	// RateLimits are the request-rate rules, normalized, in the order they
 	// are applied (see ratelimit.go). They go in the route, not the listener.
 	RateLimits []ratelimit.Rule
+	// S3Hosts says where the target's cluster would find a bucket in a
+	// request's host name; the rules' script reads requests the same way.
+	// Empty: every request has its bucket in its path.
+	S3Hosts ratelimit.Hosts
 }
 
 // Endpoint is one VIP. CNode is carried as metadata for debugging only;

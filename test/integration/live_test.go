@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"deltav/internal/lab"
+	"deltav/internal/server"
 )
 
 // TestLiveVASTThroughEnvoy is the whole thing on real equipment: a real VAST
@@ -19,49 +20,9 @@ import (
 // with `make live ENV=<file>`; see the Makefile for what the file sets.
 // Every object it writes it deletes.
 func TestLiveVASTThroughEnvoy(t *testing.T) {
-	need := func(name string) string {
-		v := os.Getenv(name)
-		if v == "" {
-			t.Fatalf("%s is not set; see `make live`", name)
-		}
-		return v
-	}
-	or := func(name, fallback string) string {
-		if v := os.Getenv(name); v != "" {
-			return v
-		}
-		return fallback
-	}
-	number := func(name, fallback string) int {
-		n, err := strconv.Atoi(or(name, fallback))
-		if err != nil || n <= 0 {
-			t.Fatalf("%s must be a positive number", name)
-		}
-		return n
-	}
-	host, user, password := need("VAST_HOST"), need("VAST_USER"), need("VAST_PASSWORD")
-	keys := &lab.Credentials{AccessKey: need("AWS_ACCESS_KEY_ID"), SecretKey: need("AWS_SECRET_ACCESS_KEY"), Region: or("AWS_REGION", "us-east-1")}
-	bucket := need("DELTAV_LAB_BUCKET")
-	pool := or("DELTAV_LAB_POOL", "main")
-	port := number("DELTAV_LAB_PORT", "80")
-	cycles := number("DELTAV_LAB_CYCLES", "200")
-	size := number("DELTAV_LAB_SIZE", "1048576")
-
-	listen := freePort(t)
-	s := daemon(t)
-	postAPI(t, s, "/api/v1/vast", map[string]any{
-		"name": "live", "host": host, "user": user, "password": password, "insecure": os.Getenv("DELTAV_LAB_INSECURE") == "1",
-	})
-	postAPI(t, s, "/api/v1/targets", map[string]any{
-		"name": "live", "cluster": "live", "pool": pool, "port": port, "listen_port": listen,
-	})
-	for name, c := range cnodeRows(t, s) {
-		t.Logf("CNode %s: healthy %v, hosts %d of the pool's VIPs", name, c.Healthy, c.VIPs)
-	}
-
-	envoy(t, s, "live-envoy-1")
-	waitMember(t, s, "live-envoy-1", "connected and in sync", inSync)
-	waitListener(t, listen)
+	s, listen, keys, bucket := liveStack(t)
+	cycles := liveNumber(t, "DELTAV_LAB_CYCLES", "200")
+	size := liveNumber(t, "DELTAV_LAB_SIZE", "1048576")
 
 	res, err := lab.RunLoad(context.Background(), lab.LoadConfig{
 		Endpoint: "http://127.0.0.1:" + strconv.Itoa(int(listen)), Bucket: bucket, Prefix: "deltav-live/", Creds: keys,
@@ -107,4 +68,58 @@ func TestLiveVASTThroughEnvoy(t *testing.T) {
 	if total != want {
 		t.Errorf("the daemon counted %d requests across CNodes; the load generator sent %d", total, want)
 	}
+}
+
+func liveNumber(t *testing.T, name, fallback string) int {
+	t.Helper()
+	v := os.Getenv(name)
+	if v == "" {
+		v = fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		t.Fatalf("%s must be a positive number", name)
+	}
+	return n
+}
+
+// liveStack is a daemon reading the real cluster named in the environment,
+// one target on its VIP pool, and one Envoy in sync with it. It returns the
+// daemon, the listener's port, the S3 keys and the bucket to use.
+func liveStack(t *testing.T) (*server.Server, uint32, *lab.Credentials, string) {
+	t.Helper()
+	need := func(name string) string {
+		v := os.Getenv(name)
+		if v == "" {
+			t.Fatalf("%s is not set; see `make live`", name)
+		}
+		return v
+	}
+	or := func(name, fallback string) string {
+		if v := os.Getenv(name); v != "" {
+			return v
+		}
+		return fallback
+	}
+	host, user, password := need("VAST_HOST"), need("VAST_USER"), need("VAST_PASSWORD")
+	keys := &lab.Credentials{AccessKey: need("AWS_ACCESS_KEY_ID"), SecretKey: need("AWS_SECRET_ACCESS_KEY"), Region: or("AWS_REGION", "us-east-1")}
+	bucket := need("DELTAV_LAB_BUCKET")
+	pool := or("DELTAV_LAB_POOL", "main")
+	port := liveNumber(t, "DELTAV_LAB_PORT", "80")
+
+	listen := freePort(t)
+	s := daemon(t)
+	postAPI(t, s, "/api/v1/vast", map[string]any{
+		"name": "live", "host": host, "user": user, "password": password, "insecure": os.Getenv("DELTAV_LAB_INSECURE") == "1",
+	})
+	postAPI(t, s, "/api/v1/targets", map[string]any{
+		"name": "live", "cluster": "live", "pool": pool, "port": port, "listen_port": listen,
+	})
+	for name, c := range cnodeRows(t, s) {
+		t.Logf("CNode %s: healthy %v, hosts %d of the pool's VIPs", name, c.Healthy, c.VIPs)
+	}
+	envoy(t, s, "live-envoy-1")
+	waitMember(t, s, "live-envoy-1", "connected and in sync", inSync)
+	waitListener(t, listen)
+	return s, listen, keys, bucket
 }

@@ -13,11 +13,24 @@ import (
 // harness stands in for Envoy's request handle: headers are a plain table,
 // and what the script says about the request is left in it too, under
 // names no header has: "__md.<key>" for metadata, "__status" and "__body"
-// for a response it sends itself.
+// for a response it sends itself. A header sent more than once is given as
+// "name", "name#2", "name#3".
 const harness = `
 function __run(headers)
   local hd = {}
   function hd:get(k) return headers[k] end
+  function hd:getNumValues(k)
+    local n = 0
+    if headers[k] then
+      n = 1
+      while headers[k .. "#" .. (n + 1)] do n = n + 1 end
+    end
+    return n
+  end
+  function hd:getAtIndex(k, i)
+    if i == 0 then return headers[k] end
+    return headers[k .. "#" .. (i + 1)]
+  end
   function hd:replace(k, v) headers[k] = v end
   function hd:remove(k) headers[k] = nil end
   local md = {}
@@ -41,19 +54,37 @@ end
 
 func load(t *testing.T, rules ...Rule) *lua.LState {
 	t.Helper()
+	return loadWith(t, Hosts{}, rules...)
+}
+
+func loadWith(t *testing.T, hosts Hosts, rules ...Rule) *lua.LState {
+	t.Helper()
 	if err := Validate(rules); err != nil {
 		t.Fatal(err)
 	}
 	L := lua.NewState()
 	t.Cleanup(L.Close)
-	if err := L.DoString(Script(rules) + harness); err != nil {
+	if err := L.DoString(Script(rules, hosts) + harness); err != nil {
 		t.Fatalf("the generated script does not load: %v", err)
 	}
 	return L
 }
 
-// identify calls the script's own identify.
+// identify calls the script's own identify for a request with at most one
+// Authorization header and no bucket in its host name.
 func identify(t *testing.T, L *lua.LState, method, path, auth, copySource string) (op, ak, bucket, subject string) {
+	t.Helper()
+	var auths []string
+	if auth != "" {
+		auths = []string{auth}
+	}
+	op, ak, bucket, subject, _ = identifyAll(t, L, method, path, "", auths, copySource)
+	return
+}
+
+// identifyAll calls the script's own identify. several says whether the
+// request named more than one access key.
+func identifyAll(t *testing.T, L *lua.LState, method, path, host string, auths []string, copySource string) (op, ak, bucket, subject string, several bool) {
 	t.Helper()
 	arg := func(s string) lua.LValue {
 		if s == "" {
@@ -61,16 +92,20 @@ func identify(t *testing.T, L *lua.LState, method, path, auth, copySource string
 		}
 		return lua.LString(s)
 	}
+	list := L.NewTable()
+	for _, a := range auths {
+		list.Append(lua.LString(a))
+	}
 	fn := L.GetGlobal("__deltav").(*lua.LTable).RawGetString("identify")
-	if err := L.CallByParam(lua.P{Fn: fn, NRet: 4, Protect: true}, lua.LString(method), lua.LString(path), arg(auth), arg(copySource)); err != nil {
+	if err := L.CallByParam(lua.P{Fn: fn, NRet: 5, Protect: true}, lua.LString(method), lua.LString(path), arg(host), list, arg(copySource)); err != nil {
 		t.Fatal(err)
 	}
 	subject = "<none>"
-	if s, ok := L.Get(-1).(lua.LString); ok {
+	if s, ok := L.Get(-2).(lua.LString); ok {
 		subject = string(s)
 	}
-	op, ak, bucket = L.Get(-4).String(), L.Get(-3).String(), L.Get(-2).String()
-	L.Pop(4)
+	op, ak, bucket, several = L.Get(-5).String(), L.Get(-4).String(), L.Get(-3).String(), lua.LVAsBool(L.Get(-1))
+	L.Pop(5)
 	return
 }
 
@@ -197,7 +232,12 @@ func TestIdentity(t *testing.T) {
 		{"presigned SigV4", "GET", "/data/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAPRE%2F20261118%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Signature=abc", "", "AKIAPRE", "data", "k"},
 		{"presigned SigV4, slashes not encoded", "GET", "/data/k?X-Amz-Credential=AKIAPRE/20261118/us-east-1/s3/aws4_request", "", "AKIAPRE", "data", "k"},
 		{"presigned SigV2", "GET", "/data/k?AWSAccessKeyId=AKIAOLD&Expires=1&Signature=x", "", "AKIAOLD", "data", "k"},
-		{"a header wins over the query", "GET", "/data/k?X-Amz-Credential=AKIAPRE%2Fx", v4, "AKIAEXAMPLE1", "data", "k"},
+		{"credential= in lower case, which VAST accepts", "GET", "/data/k", "AWS4-HMAC-SHA256 credential=AKIALOWER/20261118/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc", "AKIALOWER", "data", "k"},
+		{"CREDENTIAL= in upper case, likewise", "GET", "/data/k", "AWS4-HMAC-SHA256 CREDENTIAL=AKIAUPPER/20261118/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc", "AKIAUPPER", "data", "k"},
+		{"spaces around the =", "GET", "/data/k", "AWS4-HMAC-SHA256 Credential = AKIASPACED/20261118/us-east-1/s3/aws4_request", "AKIASPACED", "data", "k"},
+		{"a presigned parameter in another case", "GET", "/data/k?x-amz-credential=AKIAPRE%2F20261118", "", "AKIAPRE", "data", "k"},
+		{"a presigned parameter with its name encoded", "GET", "/data/k?X-Amz-%43redential=AKIAPRE%2F20261118", "", "AKIAPRE", "data", "k"},
+		{"the same key in the header and the query", "GET", "/data/k?X-Amz-Credential=AKIAEXAMPLE1%2Fx", v4, "AKIAEXAMPLE1", "data", "k"},
 		{"anonymous", "GET", "/data/k", "", "-", "data", "k"},
 		{"another scheme", "GET", "/data/k", "Bearer abc.def", "-", "data", "k"},
 		{"the key is decoded once", "PUT", "/data/a%20b/c%2Bd+e%252F", v4, "AKIAEXAMPLE1", "data", "a b/c+d+e%2F"},
@@ -206,10 +246,148 @@ func TestIdentity(t *testing.T) {
 		{"a bucket operation that is not a listing", "GET", "/data?tagging&prefix=logs/", v4, "AKIAEXAMPLE1", "data", "<none>"},
 		{"the service level", "GET", "/", v4, "AKIAEXAMPLE1", "", "<none>"},
 		{"a trailing slash is still the bucket", "GET", "/data/", v4, "AKIAEXAMPLE1", "data", ""},
+		// The path is decoded, then split: what VAST does.
+		{"the slash after the bucket encoded", "GET", "/data%2Fa/b.bin", v4, "AKIAEXAMPLE1", "data", "a/b.bin"},
+		{"the bucket encoded", "GET", "/%64ata/k", v4, "AKIAEXAMPLE1", "data", "k"},
+		{"the bucket encoded twice is another name", "GET", "/%2564ata/k", v4, "AKIAEXAMPLE1", "%64ata", "k"},
+		{"two slashes after the bucket: the key starts with one", "GET", "/data//k", v4, "AKIAEXAMPLE1", "data", "/k"},
+		{"dot segments are part of the key", "GET", "/data/x/../k", v4, "AKIAEXAMPLE1", "data", "x/../k"},
+		{"two slashes at the start: the service, and no bucket", "GET", "//data/k", v4, "AKIAEXAMPLE1", "", "<none>"},
+		{"the same with the second slash encoded", "GET", "/%2Fdata/k", v4, "AKIAEXAMPLE1", "", "<none>"},
 	} {
 		_, ak, bucket, subject := identify(t, L, c.method, c.path, c.auth, "")
 		if ak != c.ak || bucket != c.bucket || subject != c.subject {
 			t.Errorf("%s: access key %q, bucket %q, prefix subject %q; want %q, %q, %q", c.what, ak, bucket, subject, c.ak, c.bucket, c.subject)
+		}
+	}
+	// VAST answers a path that starts "//" as a listing of buckets.
+	if op, _, _, _ := identify(t, L, "GET", "//data/k", v4, ""); op != "ListBuckets" {
+		t.Errorf("GET //data/k is taken for %s, want ListBuckets", op)
+	}
+}
+
+// A request can name more than one access key. Which of them a server acts
+// on is its own business (VAST: a presigned URL's before a header's, the
+// first "credential=" in a header), so the script reports that there are
+// several and leaves the choice to no one.
+func TestSeveralAccessKeys(t *testing.T) {
+	L := load(t)
+	const real = "AWS4-HMAC-SHA256 Credential=AKIAREAL/20261118/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc"
+	const decoy = "AWS4-HMAC-SHA256 Credential=AKIADECOY/20261118/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=000"
+	for _, c := range []struct {
+		what, path string
+		auths      []string
+		first      string
+		several    bool
+	}{
+		{"one header", "/data/k", []string{real}, "AKIAREAL", false},
+		{"two headers", "/data/k", []string{decoy, real}, "AKIADECOY", true},
+		{"two headers joined into one, as a proxy may", "/data/k", []string{real + "," + decoy}, "AKIAREAL", true},
+		{"two Credential fields in one header", "/data/k", []string{strings.Replace(real, "Credential=", "Credential=AKIADECOY/x, Credential=", 1)}, "AKIADECOY", true},
+		{"a field whose name ends in Credential", "/data/k", []string{strings.Replace(real, "Credential=", "XCredential=AKIADECOY/x, Credential=", 1)}, "AKIADECOY", true},
+		{"a presigned URL and a header", "/data/k?X-Amz-Credential=AKIAREAL%2Fx&X-Amz-Signature=abc", []string{decoy}, "AKIADECOY", true},
+		{"a presigned URL with two credentials", "/data/k?X-Amz-Credential=AKIADECOY%2Fx&X-Amz-Credential=AKIAREAL%2Fx", nil, "AKIADECOY", true},
+		{"both presigned forms", "/data/k?AWSAccessKeyId=AKIADECOY&X-Amz-Credential=AKIAREAL%2Fx", nil, "AKIADECOY", true},
+		{"signature versions 2 and 4", "/data/k", []string{"AWS AKIADECOY:c2ln", real}, "AKIADECOY", true},
+		{"the same key every time", "/data/k?X-Amz-Credential=AKIAREAL%2Fx", []string{real, real}, "AKIAREAL", false},
+		{"none", "/data/k", nil, "-", false},
+	} {
+		_, ak, _, _, several := identifyAll(t, L, "GET", c.path, "", c.auths, "")
+		if ak != c.first || several != c.several {
+			t.Errorf("%s: access key %q, several %v; want %q, %v", c.what, ak, several, c.first, c.several)
+		}
+	}
+
+	// With a rule that looks at access keys, such a request is refused: not
+	// throttled, but told it is malformed. Nothing is counted.
+	headers := map[string]string{"authorization": decoy, "authorization#2": real}
+	for _, rule := range []Rule{
+		{Name: "by-key", LimitPerSecond: 5, Per: []string{PerAccessKey}},
+		{Name: "one-key", AccessKey: []string{"AKIAREAL"}, Blocked: true},
+	} {
+		L := load(t, rule)
+		out := run(t, L, "GET", "/data/k", headers)
+		if got := slots(out); got != "REFUSED by "+RefusedSeveralKeys+" (400)" {
+			t.Errorf("rule %s: %q", rule.Name, got)
+		}
+		if out["__body"] != RefusalBody(400) || !strings.Contains(out["__body"], "<Code>InvalidRequest</Code>") || out["__retry-after"] != "" || out[SlotKeyHeader(1)] != "" {
+			t.Errorf("rule %s: answered %v", rule.Name, out)
+		}
+		if out["__md."+MetadataOperation] != "GetObject" || out["__md."+MetadataBucket] != "data" {
+			t.Errorf("rule %s: metadata %v", rule.Name, out)
+		}
+		// One key, named twice, is no doubt at all.
+		if got := slots(run(t, L, "GET", "/data/k", map[string]string{"authorization": decoy, "authorization#2": decoy})); strings.HasPrefix(got, "REFUSED") {
+			t.Errorf("rule %s: the same key twice: %q", rule.Name, got)
+		}
+	}
+	// With no rule that looks at access keys it makes no difference whose
+	// the request is, and it is treated as any other.
+	L = load(t, Rule{Name: "gets", Operation: []string{"GetObject"}, LimitPerSecond: 5, Per: []string{PerBucket}})
+	if got := slots(run(t, L, "GET", "/data/k", headers)); got != "gets=data" {
+		t.Errorf("with no rule about access keys: %q", got)
+	}
+	if nameRE.MatchString(RefusedSeveralKeys) {
+		t.Error("a rule could be given the name that marks these refusals")
+	}
+}
+
+// A bucket can be in the host name. VAST looks for it there when the host
+// name is under the cluster's DNS suffix, and so must the script, or a rule
+// about a bucket is avoided by naming the bucket in the other place.
+func TestBucketInTheHostName(t *testing.T) {
+	hosts := Hosts{Suffixes: []string{"DNS1.example.com."}, Pools: []string{"main", "Second", "", "main"}}
+	L := loadWith(t, hosts)
+	for _, c := range []struct{ what, host, path, bucket, subject string }{
+		{"the pool's own name: the bucket is in the path", "main.dns1.example.com", "/data/k", "data", "k"},
+		{"bucket before the pool's name", "data.main.dns1.example.com", "/k", "data", "k"},
+		{"before another pool's name", "data.second.dns1.example.com", "/a/b", "data", "a/b"},
+		{"with a port", "data.main.dns1.example.com:8080", "/k", "data", "k"},
+		{"with a dot at the end", "data.main.dns1.example.com.", "/k", "data", "k"},
+		{"with both", "data.main.dns1.example.com.:80", "/k", "data", "k"},
+		{"the domain in upper case; the bucket is taken as written", "Data.MAIN.DNS1.EXAMPLE.COM", "/k", "Data", "k"},
+		{"bucket before the suffix, no pool", "data.dns1.example.com", "/k", "data", "k"},
+		{"then the path is all key, whatever it starts with", "data.dns1.example.com", "/data/k", "data", "data/k"},
+		{"and is decoded like any other", "data.dns1.example.com", "/a%2Fb%20c", "data", "a/b c"},
+		{"a bucket with a dot in it", "x.data.main.dns1.example.com", "/k", "x.data", "k"},
+		{"a label that is no pool belongs to the bucket", "data.x.dns1.example.com", "/k", "data.x", "k"},
+		{"the suffix alone", "dns1.example.com", "/data/k", "data", "k"},
+		{"a name not under the suffix", "data.main.dns2.example.com", "/data/k", "data", "k"},
+		{"a name that only ends like the suffix", "data.xdns1.example.com", "/data/k", "data", "k"},
+		{"an address", "127.0.0.1:9000", "/data/k", "data", "k"},
+		{"an IPv6 address", "[::1]:9000", "/data/k", "data", "k"},
+		{"no host at all", "", "/data/k", "data", "k"},
+		{"the bucket itself, addressed by host: a listing with no prefix", "data.main.dns1.example.com", "/", "data", ""},
+		{"a listing addressed by host", "data.main.dns1.example.com", "/?list-type=2&prefix=logs/", "data", "logs/"},
+	} {
+		op, _, bucket, subject, _ := identifyAll(t, L, "GET", c.path, c.host, nil, "")
+		if bucket != c.bucket || subject != c.subject {
+			t.Errorf("%s (%s %s): bucket %q, subject %q (%s); want %q, %q", c.what, c.host, c.path, bucket, subject, op, c.bucket, c.subject)
+		}
+	}
+	if op, _, _, _, _ := identifyAll(t, L, "GET", "/", "data.main.dns1.example.com", nil, ""); op != "ListObjects" {
+		t.Errorf("GET / on a bucket's host name is taken for %s, want ListObjects", op)
+	}
+	// A target whose cluster's names are not known reads every request by
+	// its path.
+	if _, _, bucket, _, _ := identifyAll(t, load(t), "GET", "/k", "data.main.dns1.example.com", nil, ""); bucket != "k" {
+		t.Errorf("with no names known: bucket %q", bucket)
+	}
+
+	// And so a rule about a bucket holds for both ways of naming it.
+	L = loadWith(t, hosts,
+		Rule{Name: "no-deletes", Operation: []string{"DeleteObject"}, Bucket: []string{"archive"}, Blocked: true},
+		Rule{Name: "per-bucket", LimitPerSecond: 5, Per: []string{PerBucket}})
+	for _, c := range []struct{ host, path, want string }{
+		{"127.0.0.1:9000", "/archive/x", "REFUSED by no-deletes (503)"},
+		{"archive.main.dns1.example.com", "/x", "REFUSED by no-deletes (503)"},
+		{"archive.dns1.example.com:80", "/x", "REFUSED by no-deletes (503)"},
+		{"main.dns1.example.com", "/archive/x", "REFUSED by no-deletes (503)"},
+		{"other.main.dns1.example.com", "/archive/x", "per-bucket=other"},
+		{"other.main.dns1.example.com", "/x", "per-bucket=other"},
+	} {
+		if got := slots(run(t, L, "DELETE", c.path, map[string]string{":authority": c.host})); got != c.want {
+			t.Errorf("DELETE %s on %s: %q, want %q", c.path, c.host, got, c.want)
 		}
 	}
 }
@@ -285,9 +463,9 @@ func TestRuleMatching(t *testing.T) {
 		// client spells it.
 		{"blocked, the bucket percent-encoded", "DELETE", "/arch%69ve/x", auth(ak1), "REFUSED by no-deletes (503)"},
 		{"blocked, the whole bucket percent-encoded", "DELETE", "/%61%72%63%68%69%76%65/x", auth(ak1), "REFUSED by no-deletes (503)"},
-		{"blocked, behind a second slash", "DELETE", "//archive/x", auth(ak1), "REFUSED by no-deletes (503)"},
+		{"blocked, the slash after the bucket percent-encoded", "DELETE", "/archive%2Fx", auth(ak1), "REFUSED by no-deletes (503)"},
+		{"behind a second slash there is no bucket: VAST answers for the service", "DELETE", "//archive/x", auth(ak1), "per-key=" + ak1},
 		{"an encoded bucket is the same bucket to a filter", "PUT", "/check%70oints/ckpt/x", auth(ak1), "uploads=" + ak1 + ",checkpoints per-key=" + ak1},
-		{"an encoded slash is not a separator", "DELETE", "/archive%2Fx", auth(ak1), "per-key=" + ak1},
 	} {
 		if got := marks(c.method, c.path, c.headers); got != c.want {
 			t.Errorf("%s (%s %s): %q, want %q", c.what, c.method, c.path, got, c.want)
@@ -348,8 +526,10 @@ func TestNothingMatchedGoesUncounted(t *testing.T) {
 		"//":            "per-bucket=-",
 		"/?max-keys=1":  "per-bucket=-",
 		"/data":         "per-bucket=data",
-		"//data/k":      "per-bucket=data",
-		"///data//k":    "per-bucket=data",
+		"//data/k":      "per-bucket=-",
+		"///data//k":    "per-bucket=-",
+		"/data%2Fk":     "per-bucket=data",
+		"/data//k":      "per-bucket=data",
 		"/d%61ta/k":     "per-bucket=data",
 		"/%2D/k":        "per-bucket=-",
 		"/%20/k":        "per-bucket=%20",
@@ -412,7 +592,7 @@ func TestScriptCannotBeBrokenByARule(t *testing.T) {
 			t.Errorf("value %q: the request was not matched", v)
 		}
 	}
-	if s := Script([]Rule{r}); strings.Contains(s, "os.exit") && !strings.Contains(s, `os.exit\040\041`) && strings.Contains(s, `"]] os.exit()`) {
+	if s := Script([]Rule{r}, Hosts{}); strings.Contains(s, "os.exit") && !strings.Contains(s, `os.exit\040\041`) && strings.Contains(s, `"]] os.exit()`) {
 		t.Error("a rule's value appears in the script unescaped")
 	}
 }

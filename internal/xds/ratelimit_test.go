@@ -110,7 +110,7 @@ func TestRouteWithAndWithoutRules(t *testing.T) {
 	// With rules: the route carries the script, nothing is turned off, and
 	// what the script writes for the quota filters stops at the router.
 	route, off, script = perRoute(t, r)
-	if len(off) != 1 || off[LuaFilter] || script != ratelimit.Script(spec.RateLimits) || !strings.Contains(script, `name="gets"`) {
+	if len(off) != 1 || off[LuaFilter] || script != ratelimit.Script(spec.RateLimits, spec.S3Hosts) || !strings.Contains(script, `name="gets"`) {
 		t.Errorf("with rules: off %v, script of %d bytes", off, len(script))
 	}
 	if got := strings.Join(route.GetRequestHeadersToRemove(), " "); got != strings.Join(ratelimit.SlotHeaders(), " ") || len(ratelimit.SlotHeaders()) != 3*ratelimit.Slots {

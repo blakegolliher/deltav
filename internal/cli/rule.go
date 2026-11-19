@@ -147,7 +147,9 @@ func newRuleRefusalsCmd() *cobra.Command {
 			"The daemon remembers the latest thousand, and forgets them when it stops; the\n" +
 			"counts in \"rule list\" cover every refusal. For a request over a limit that was\n" +
 			"counted by several rules, Envoy does not say which of them refused it: they are\n" +
-			"all named. The access key is the one the request claimed, before VAST checked it.",
+			"all named. The access key is the one the request claimed, before VAST checked it.\n" +
+			"A request refused for naming more than one access key is listed under\n" +
+			"\"" + ratelimit.RefusedSeveralKeys + "\" where a rule's name would be.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if limit < 1 {
@@ -162,7 +164,7 @@ func newRuleRefusalsCmd() *cobra.Command {
 						switch {
 						case rule == "":
 							rule = "-"
-						case r.Blocked:
+						case r.Blocked && rule != ratelimit.RefusedSeveralKeys:
 							rule += " (blocked)"
 						}
 						dash := func(s string) string {
@@ -269,6 +271,10 @@ func newRuleSetCmd() *cobra.Command {
 			"open or new. A request is counted by what it claims to be, before VAST checks its\n" +
 			"signature: someone who knows an access key ID can use up that key's limit with\n" +
 			"requests VAST will reject. Add client to --per where that matters.\n\n" +
+			"A request is read as VAST reads it: its path decoded and then split into bucket and\n" +
+			"key, and its bucket taken from the host name where VAST would look there. A request\n" +
+			"that names more than one access key is refused with 400 InvalidRequest while any\n" +
+			"rule looks at access keys.\n\n" +
 			"If the daemon cannot be reached, blocked rules go on refusing, and each Envoy keeps\n" +
 			"the share of a limit it had for ten minutes. After that, limits are not enforced\n" +
 			"until the daemon is back.\n\n" +

@@ -94,7 +94,10 @@ integration: envoy
 
 # The same on real equipment: a real VAST cluster (read with GETs only), real
 # Envoy, and PUT/GET/DELETE round trips against a real bucket through the
-# loopback listener. Every object written is deleted again.
+# loopback listener. Then one object is asked for in every unusual way we
+# know of (encoded paths, the bucket in the host name, several access keys),
+# to check that rate rules read requests as this cluster does. Every object
+# written is under deltav-live/ and is deleted again.
 #
 #   make live ENV=~/.deltav-lab.env
 #
@@ -102,11 +105,13 @@ integration: envoy
 # VAST_PASSWORD, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
 # DELTAV_LAB_BUCKET; and optionally DELTAV_LAB_POOL (main), DELTAV_LAB_PORT
 # (80), DELTAV_LAB_CYCLES (200), DELTAV_LAB_SIZE (1048576 bytes), AWS_REGION
-# (us-east-1) and DELTAV_LAB_INSECURE=1 for a self-signed VAST certificate.
+# (us-east-1), DELTAV_LAB_INSECURE=1 for a self-signed VAST certificate, and
+# DELTAV_LAB_S3_ENDPOINT, the DNS name clients use for the pool: with it the
+# bucket is also tried in the host name.
 live: envoy
 	@test -n "$(ENV)" -a -r "$(ENV)" || { echo "usage: make live ENV=<file>; see the Makefile" >&2; exit 1; }
 	@set -a && . "$(ENV)" && set +a && \
-		ENVOY_BIN=$(abspath $(ENVOY_BIN)) $(GO) test -tags 'integration live' -count=1 -v -run TestLiveVASTThroughEnvoy ./test/integration/...
+		ENVOY_BIN=$(abspath $(ENVOY_BIN)) $(GO) test -tags 'integration live' -count=1 -v -run 'TestLive' ./test/integration/...
 
 # Installs the binary, the two systemd units and, if they are not there yet,
 # the example environment files. The units expect the binary in

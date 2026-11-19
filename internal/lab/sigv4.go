@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -59,6 +60,14 @@ func (c Credentials) service() string {
 // that alters any of them breaks the signature. payloadHash is the hex
 // SHA-256 of the body, or UnsignedPayload.
 func Sign(req *http.Request, c Credentials, payloadHash string, now time.Time) {
+	SignAs(req, c, payloadHash, now, canonicalURI(req.URL.EscapedPath()))
+}
+
+// SignAs is Sign with the canonical URI given and not worked out from the
+// request's path. It is for finding out how a server reads a path that can
+// be read two ways: the caller signs for one reading and sees whether the
+// server agrees.
+func SignAs(req *http.Request, c Credentials, payloadHash string, now time.Time, uri string) {
 	now = now.UTC()
 	req.Header.Set("X-Amz-Date", now.Format(amzDateFmt))
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
@@ -76,10 +85,25 @@ func Sign(req *http.Request, c Credentials, payloadHash string, now time.Time) {
 	sort.Strings(signed)
 
 	scope := now.Format("20060102") + "/" + c.region() + "/" + c.service() + "/aws4_request"
-	canonical := canonicalRequest(req.Method, req.URL.EscapedPath(), req.URL.RawQuery, host, req.Header, signed, payloadHash)
+	canonical := canonicalRequest(req.Method, uri, req.URL.RawQuery, host, req.Header, signed, payloadHash)
 	sig := signature(c.SecretKey, scope, now.Format(amzDateFmt), canonical)
 	req.Header.Set("Authorization", fmt.Sprintf("%s Credential=%s/%s, SignedHeaders=%s, Signature=%s",
 		sigAlgorithm, c.AccessKey, scope, strings.Join(signed, ";"), sig))
+}
+
+// Presign returns the query string of a presigned URL: SigV4 carried in the
+// query and not in a header, the body unsigned, only Host signed. uri is the
+// canonical URI, as for SignAs.
+func Presign(method, host, uri string, c Credentials, now time.Time, expires time.Duration) string {
+	now = now.UTC()
+	scope := now.Format("20060102") + "/" + c.region() + "/" + c.service() + "/aws4_request"
+	query := "X-Amz-Algorithm=" + sigAlgorithm +
+		"&X-Amz-Credential=" + uriEncode(c.AccessKey+"/"+scope, false) +
+		"&X-Amz-Date=" + now.Format(amzDateFmt) +
+		"&X-Amz-Expires=" + strconv.Itoa(int(expires/time.Second)) +
+		"&X-Amz-SignedHeaders=host"
+	canonical := canonicalRequest(method, uri, query, host, nil, []string{"host"}, UnsignedPayload)
+	return query + "&X-Amz-Signature=" + signature(c.SecretKey, scope, now.Format(amzDateFmt), canonical)
 }
 
 // Verify checks the SigV4 Authorization header of a request a server
@@ -146,7 +170,7 @@ func Verify(r *http.Request, rawPath string, secretFor func(accessKey string) (s
 		return errors.New("no X-Amz-Content-Sha256 header")
 	}
 
-	canonical := canonicalRequest(r.Method, rawPath, r.URL.RawQuery, r.Host, r.Header, signed, payloadHash)
+	canonical := canonicalRequest(r.Method, canonicalURI(rawPath), r.URL.RawQuery, r.Host, r.Header, signed, payloadHash)
 	want := signature(secret, scope, amzDate, canonical)
 	if subtle.ConstantTimeCompare([]byte(want), []byte(params["Signature"])) != 1 {
 		return errors.New("signature does not match")
@@ -154,13 +178,13 @@ func Verify(r *http.Request, rawPath string, secretFor func(accessKey string) (s
 	return nil
 }
 
-// canonicalRequest builds the SigV4 canonical request. signed must be
-// lower-case and sorted.
-func canonicalRequest(method, rawPath, rawQuery, host string, h http.Header, signed []string, payloadHash string) string {
+// canonicalRequest builds the SigV4 canonical request. uri is the canonical
+// URI; signed must be lower-case and sorted.
+func canonicalRequest(method, uri, rawQuery, host string, h http.Header, signed []string, payloadHash string) string {
 	var b strings.Builder
 	b.WriteString(method)
 	b.WriteByte('\n')
-	b.WriteString(canonicalURI(rawPath))
+	b.WriteString(uri)
 	b.WriteByte('\n')
 	b.WriteString(canonicalQuery(rawQuery))
 	b.WriteByte('\n')

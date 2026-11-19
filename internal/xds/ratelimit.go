@@ -115,7 +115,7 @@ func (t TargetSpec) routeLimits() (map[string]*anypb.Any, []string, error) {
 		return per, nil, nil
 	}
 	script, err := toAny(&luav3.LuaPerRoute{Override: &luav3.LuaPerRoute_SourceCode{SourceCode: &corev3.DataSource{
-		Specifier: &corev3.DataSource_InlineString{InlineString: ratelimit.Script(t.RateLimits)},
+		Specifier: &corev3.DataSource_InlineString{InlineString: ratelimit.Script(t.RateLimits, t.S3Hosts)},
 	}}})
 	if err != nil {
 		return nil, nil, err

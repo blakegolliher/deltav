@@ -39,7 +39,7 @@ func newServeCmd() *cobra.Command {
 	f.StringVar(&cfg.HTTPAddr, "http-addr", "127.0.0.1:18080", "listen address for the HTTP API, web UI and /metrics")
 	f.StringVar(&cfg.APIToken, "api-token", "", "bearer token for the HTTP API; required when --http-addr is not loopback (prefer the env var)")
 	f.StringVar(&cfg.StateDir, "state-dir", "/var/lib/deltav", "directory for the state file (VAST clusters with their credentials, targets), kept at mode 0600")
-	f.DurationVar(&cfg.VASTPollInterval, "vast-poll-interval", server.DefaultVASTPollInterval, "how often each attached VAST cluster is read (three GETs)")
+	f.DurationVar(&cfg.VASTPollInterval, "vast-poll-interval", server.DefaultVASTPollInterval, "how often each attached VAST cluster is read (four GETs)")
 	f.Float64Var(&cfg.LimitMinChange, "limit-min-change", limit.DefaultMinChange, "enforce mode: push a new per-Envoy share only if it differs from the one in force by more than this fraction")
 	f.DurationVar(&cfg.LimitMinInterval, "limit-min-interval", limit.DefaultMinInterval, "enforce mode: never push a new per-Envoy share sooner than this after the last one")
 	f.DurationVar(&cfg.LoadReportInterval, "load-report-interval", telemetry.DefaultLoadReportInterval, "how often each Envoy reports in-flight requests per endpoint")

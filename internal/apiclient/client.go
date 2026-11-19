@@ -160,6 +160,11 @@ type TargetStatus struct {
 	Problem  string       `json:"problem"`
 	Held     bool         `json:"held"`
 	Limit    *LimitStatus `json:"limit"`
+	// BucketHosts are the host names ("*.<suffix>") under which rate rules
+	// read a request's bucket from its host name, as VAST does;
+	// BucketHostsProblem says why they are not known.
+	BucketHosts        []string `json:"bucket_hosts"`
+	BucketHostsProblem string   `json:"bucket_hosts_problem"`
 }
 
 // Endpoint is one address served to Envoys for a target.
