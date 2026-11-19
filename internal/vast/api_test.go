@@ -75,8 +75,18 @@ func TestListCallsDecodeRealResponses(t *testing.T) {
 		}
 	}
 	main, ok := poolNames["main"]
-	if !ok || main.ID != 2 || main.TenantName != "default" || main.Role != "PROTOCOLS" {
+	if !ok || main.ID != 2 || main.TenantName != "default" || main.Role != "PROTOCOLS" || main.DomainName != "main" {
 		t.Fatalf("pool main: %+v (found %v)", main, ok)
+	}
+
+	// The DNS suffix: with a pool's own label it makes the name clients use
+	// for the pool, and it is where VAST looks for a bucket in a host name.
+	dns, err := c.ListDNS(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dns) != 1 || dns[0].ID != 1 || dns[0].Name != "dns" || dns[0].DomainSuffix != "dns1.example.com" || !dns[0].Enabled {
+		t.Fatalf("DNS: %+v", dns)
 	}
 
 	vips, err := c.ListVIPs(ctx)
@@ -111,9 +121,9 @@ func TestListCallsDecodeRealResponses(t *testing.T) {
 		t.Errorf("pool main: VIPs per CNode %v, want two on each of three", mainPerCNode)
 	}
 
-	// One login, three GETs, nothing else.
+	// One login, four GETs, nothing else.
 	req := srv.Requests()
-	if len(req) != 4 || req["POST /api/token/"] != 1 || req["GET /api/cnodes/"] != 1 || req["GET /api/vippools/"] != 1 || req["GET /api/vips/"] != 1 {
+	if len(req) != 5 || req["POST /api/token/"] != 1 || req["GET /api/cnodes/"] != 1 || req["GET /api/vippools/"] != 1 || req["GET /api/vips/"] != 1 || req["GET /api/dns/"] != 1 {
 		t.Errorf("requests: %v", req)
 	}
 	if srv.Mutating() != 0 {

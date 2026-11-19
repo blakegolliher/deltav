@@ -4,6 +4,12 @@ Sanitized responses of three list calls on a VAST 5.5.3 lab cluster, read on 202
 `dvlab vastprobe` (GET only): `cnodes.json` (`GET /api/cnodes/`, 3 CNodes), `vippools.json`
 (`GET /api/vippools/`, 48 pools) and `vips.json` (`GET /api/vips/`, 187 VIPs).
 
+`dns.json` (`GET /api/dns/`, one object) was read from the same cluster on 2026-11-19, by
+itself: `bin/dvlab vastprobe --path dns/`. Its address and GUID placeholders are therefore
+numbered on their own and do not refer to anything in the other three files. Its
+`domain_suffix` is replaced whole, by `dns1.example.com`; a pool's `domain_name` in
+`vippools.json` is the label that goes in front of it.
+
 Field names, structure, numbers and booleans are exactly as the cluster returned them, with
 object keys sorted. String values that identify the site were replaced by
 `internal/lab/sanitize.go`, consistently across the three files, so a VIP still names its pool

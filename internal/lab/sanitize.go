@@ -136,6 +136,7 @@ func (s *Sanitizer) reset() {
 		"pool":        mk(numbered("pool"), nil),
 		"box":         mk(numbered("box"), nil),
 		"domain":      mk(numbered("domain"), nil),
+		"suffix":      mk(func(n int) (string, error) { return fmt.Sprintf("dns%d.example.com", n), nil }, nil),
 		"clustername": mk(func(n int) (string, error) { return fmt.Sprintf("cluster%d", n), nil }, nil),
 	}
 	s.known = nil
@@ -183,6 +184,9 @@ var fieldRules = []struct {
 	// A chassis is named after its serial number.
 	{"box", "", regexp.MustCompile(`^[cde]?box(_name)?$`)},
 	{"domain", "", regexp.MustCompile(`^domain(_name)?$`)},
+	// The DNS suffix under which a cluster's pools are named. Replaced whole:
+	// replacing the parts of it that are known would leave the rest.
+	{"suffix", "", regexp.MustCompile(`domain_suffix`)},
 	// A VIP pool's name can be a person's or a project's.
 	{"pool", "vippools", regexp.MustCompile(`^name$`)},
 	{"pool", "vips", regexp.MustCompile(`^vippool(_name)?$`)},

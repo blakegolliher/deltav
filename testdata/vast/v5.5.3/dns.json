@@ -1,0 +1,31 @@
+[
+  {
+    "bgp_config_id": null,
+    "bgp_config_name": null,
+    "cnode_ids": [],
+    "cnodes": [],
+    "domain_suffix": "dns1.example.com",
+    "enable_l3": false,
+    "enabled": true,
+    "guid": "guid-1",
+    "id": 1,
+    "invalid_name_response": "NXDOMAIN",
+    "invalid_type_response": "NOERROR",
+    "name": "dns",
+    "net_type": "EXTERNAL_PORT",
+    "port": 53,
+    "sync": "SYNCED",
+    "sync_time": "2026-11-12T02:28:08.141556Z",
+    "title": "dns",
+    "ttl": 0,
+    "url": "https://cluster1.example.com/api/dns/1",
+    "vip": "192.0.2.1",
+    "vip_allocation": "CUSTOMER_PROVIDED",
+    "vip_gateway": "192.0.2.2",
+    "vip_ipv6": "",
+    "vip_ipv6_gateway": "",
+    "vip_ipv6_subnet_cidr": 0,
+    "vip_subnet_cidr": 16,
+    "vip_vlan": 0
+  }
+]

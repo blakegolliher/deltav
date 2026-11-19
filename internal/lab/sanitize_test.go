@@ -359,3 +359,18 @@ func itoa(n int) string {
 	b, _ := json.Marshal(n)
 	return string(b)
 }
+
+// A DNS suffix is a host name with parts the sanitizer knows (the cluster,
+// its domain) and parts it does not. Replacing only the known parts would
+// leave the others in the fixture.
+func TestSanitizeDNSSuffixIsReplacedWhole(t *testing.T) {
+	docs := map[string]any{"dns": decodeDoc(t, `[{"id": 1, "name": "dns", "domain_suffix": "west-acme204.lab.acme.example.net"}]`)}
+	out, _, err := NewSanitizer("acme204.lab.acme.example.net").Sanitize(docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out["dns"].([]any)[0].(map[string]any)["domain_suffix"]
+	if got != "dns1.example.com" {
+		t.Errorf("domain_suffix = %q, want dns1.example.com", got)
+	}
+}

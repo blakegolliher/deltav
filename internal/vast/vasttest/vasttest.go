@@ -1,6 +1,6 @@
 // Package vasttest is a mock VAST management API driven by fixtures: the
 // sanitized responses of a real cluster under testdata/vast. It serves the
-// token calls and the three list endpoints Delta-V reads, and lets a test
+// token calls and the four list endpoints Delta-V reads, and lets a test
 // change the cluster's state (move a VIP, fail a CNode) between polls.
 //
 // It answers anything that is not a GET or a token call with 405 and counts
@@ -30,20 +30,22 @@ type Server struct {
 	srv *httptest.Server
 
 	mu       sync.Mutex
-	docs     map[string][]map[string]any // "cnodes", "vippools", "vips"
+	docs     map[string][]map[string]any // "cnodes", "vippools", "vips", "dns"
 	tokens   map[string]bool             // access tokens it accepts
 	refresh  map[string]bool             // refresh tokens it accepts
 	seq      int
 	requests map[string]int // "METHOD /path" -> count
 	mutating int
 	fail     int // answer this many list requests with 500
+	// forbidden list endpoints answer 403.
+	forbidden map[string]bool
 }
 
-// New loads cnodes.json, vippools.json and vips.json from dir and starts an
+// New loads cnodes.json, vippools.json, vips.json and dns.json from dir and starts an
 // HTTPS server with a self-signed certificate. Close it when done.
 func New(dir string) (*Server, error) {
 	s := &Server{docs: map[string][]map[string]any{}, tokens: map[string]bool{}, refresh: map[string]bool{}, requests: map[string]int{}}
-	for _, name := range []string{"cnodes", "vippools", "vips"} {
+	for _, name := range []string{"cnodes", "vippools", "vips", "dns"} {
 		b, err := os.ReadFile(filepath.Join(dir, name+".json"))
 		if err != nil {
 			return nil, err
@@ -109,6 +111,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		doc, ok := s.docs[name]
 		if !ok {
 			reply(http.StatusNotFound, map[string]string{"detail": "Not found."})
+			return
+		}
+		if s.forbidden[name] {
+			reply(http.StatusForbidden, map[string]string{"detail": "You do not have permission to perform this action."})
 			return
 		}
 		if s.fail > 0 {
@@ -208,6 +214,27 @@ func (s *Server) RemovePoolVIPs(pool string) int {
 	n := len(s.docs["vips"]) - len(kept)
 	s.docs["vips"] = kept
 	return n
+}
+
+// Forbid makes one list endpoint ("dns", "vips", ...) answer 403 from now
+// on, as a cluster does for a user who may not read it; allowed again with
+// forbidden false.
+func (s *Server) Forbid(doc string, forbidden bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.forbidden == nil {
+		s.forbidden = map[string]bool{}
+	}
+	s.forbidden[doc] = forbidden
+}
+
+// SetDNSSuffix changes the cluster's DNS suffix.
+func (s *Server) SetDNSSuffix(suffix string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, d := range s.docs["dns"] {
+		d["domain_suffix"] = suffix
+	}
 }
 
 // FailNext makes the next n list requests answer 500.

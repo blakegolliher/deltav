@@ -42,6 +42,19 @@ type VIPPool struct {
 	StartIP    string     `json:"start_ip"`
 	EndIP      string     `json:"end_ip"`
 	IPRanges   [][]string `json:"ip_ranges"` // [[first, last], ...]
+	// DomainName is the pool's own DNS label, "" if it has none. With the
+	// cluster's DNS suffix it makes the name clients use: <DomainName>.<suffix>.
+	DomainName string `json:"domain_name"`
+}
+
+// DNS is the cluster's DNS service, from GET /api/dns/. Delta-V wants one
+// thing from it: the suffix under which the cluster's pools are named, which
+// is also where VAST looks for a bucket in a request's host name.
+type DNS struct {
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	DomainSuffix string `json:"domain_suffix"`
+	Enabled      bool   `json:"enabled"`
 }
 
 // VIP is one virtual IP and where it is now, from GET /api/vips/. VIPPool
@@ -55,11 +68,12 @@ type VIP struct {
 	TenantName string `json:"tenant_name"`
 }
 
-// API is everything Delta-V asks of a VAST cluster: three reads.
+// API is everything Delta-V asks of a VAST cluster: four reads.
 type API interface {
 	ListCNodes(ctx context.Context) ([]CNode, error)
 	ListVIPPools(ctx context.Context) ([]VIPPool, error)
 	ListVIPs(ctx context.Context) ([]VIP, error)
+	ListDNS(ctx context.Context) ([]DNS, error)
 }
 
 var _ API = (*Client)(nil)
@@ -81,4 +95,11 @@ func (c *Client) ListVIPPools(ctx context.Context) ([]VIPPool, error) {
 func (c *Client) ListVIPs(ctx context.Context) ([]VIP, error) {
 	var out []VIP
 	return out, c.Get(ctx, "vips/", &out)
+}
+
+// ListDNS returns the cluster's DNS services: one, on the cluster this was
+// written against.
+func (c *Client) ListDNS(ctx context.Context) ([]DNS, error) {
+	var out []DNS
+	return out, c.Get(ctx, "dns/", &out)
 }
