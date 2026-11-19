@@ -41,7 +41,13 @@ var (
 //
 // It writes one small object under deltav-live/ and deletes it.
 func TestLiveRulesReadRequestsAsVASTDoes(t *testing.T) {
-	s, listen, keys, bucket := liveStack(t)
+	for _, m := range liveModes(t) {
+		t.Run(m.name, func(t *testing.T) { liveOddRequests(t, m) })
+	}
+}
+
+func liveOddRequests(t *testing.T, mode liveMode) {
+	s, listen, keys, bucket := liveStack(t, mode)
 	self := fmt.Sprintf("127.0.0.1:%d", listen)
 	key := fmt.Sprintf("deltav-live/probe-%d", time.Now().UnixNano())
 	content := "deltav path probe " + key

@@ -18,9 +18,16 @@ import (
 // cluster read over its API (GETs only), real Envoy, and PUT/GET/DELETE
 // round trips against a real bucket through the loopback listener. Run it
 // with `make live ENV=<file>`; see the Makefile for what the file sets.
-// Every object it writes it deletes.
+// Every object it writes it deletes. It runs once for each way of reaching
+// the VIPs that the environment describes: plain HTTP, and TLS.
 func TestLiveVASTThroughEnvoy(t *testing.T) {
-	s, listen, keys, bucket := liveStack(t)
+	for _, m := range liveModes(t) {
+		t.Run(m.name, func(t *testing.T) { liveRoundTrips(t, m) })
+	}
+}
+
+func liveRoundTrips(t *testing.T, mode liveMode) {
+	s, listen, keys, bucket := liveStack(t, mode)
 	cycles := liveNumber(t, "DELTAV_LAB_CYCLES", "200")
 	size := liveNumber(t, "DELTAV_LAB_SIZE", "1048576")
 
@@ -83,10 +90,51 @@ func liveNumber(t *testing.T, name, fallback string) int {
 	return n
 }
 
+// liveMode is one way of reaching the pool's VIPs.
+type liveMode struct {
+	name string
+	port int
+	tls  map[string]any // the target's TLS setting; nil for plain HTTP
+}
+
+// liveModes lists the ways the environment asks for: plain HTTP to
+// DELTAV_LAB_PORT always, and TLS to DELTAV_LAB_TLS_PORT if that is set,
+// verified against DELTAV_LAB_TLS_CA_FILE if that is set and unverified if
+// DELTAV_LAB_TLS_INSECURE is 1 (both, if both are). The name sent and
+// verified is DELTAV_LAB_TLS_SERVER_NAME, or else DELTAV_LAB_S3_ENDPOINT.
+func liveModes(t *testing.T) []liveMode {
+	t.Helper()
+	modes := []liveMode{{name: "http", port: liveNumber(t, "DELTAV_LAB_PORT", "80")}}
+	if os.Getenv("DELTAV_LAB_TLS_PORT") == "" {
+		return modes
+	}
+	port := liveNumber(t, "DELTAV_LAB_TLS_PORT", "443")
+	name := os.Getenv("DELTAV_LAB_TLS_SERVER_NAME")
+	if name == "" {
+		name = strings.TrimPrefix(strings.TrimPrefix(os.Getenv("DELTAV_LAB_S3_ENDPOINT"), "https://"), "http://")
+		name, _, _ = strings.Cut(name, "/")
+	}
+	if name == "" {
+		t.Fatal("DELTAV_LAB_TLS_PORT is set: set DELTAV_LAB_TLS_SERVER_NAME too, the name to send and to find in the certificate")
+	}
+	ca, insecure := os.Getenv("DELTAV_LAB_TLS_CA_FILE"), os.Getenv("DELTAV_LAB_TLS_INSECURE") == "1"
+	if ca == "" && !insecure {
+		t.Fatal("DELTAV_LAB_TLS_PORT is set: set DELTAV_LAB_TLS_CA_FILE to verify the certificate against, or DELTAV_LAB_TLS_INSECURE=1, or both")
+	}
+	if ca != "" {
+		modes = append(modes, liveMode{name: "tls-verified", port: port, tls: map[string]any{"server_name": name, "ca_file": ca}})
+	}
+	if insecure {
+		modes = append(modes, liveMode{name: "tls-unverified", port: port, tls: map[string]any{"server_name": name, "insecure": true}})
+	}
+	return modes
+}
+
 // liveStack is a daemon reading the real cluster named in the environment,
-// one target on its VIP pool, and one Envoy in sync with it. It returns the
-// daemon, the listener's port, the S3 keys and the bucket to use.
-func liveStack(t *testing.T) (*server.Server, uint32, *lab.Credentials, string) {
+// one target on its VIP pool reached as mode says, and one Envoy in sync
+// with it. It returns the daemon, the listener's port, the S3 keys and the
+// bucket to use.
+func liveStack(t *testing.T, mode liveMode) (*server.Server, uint32, *lab.Credentials, string) {
 	t.Helper()
 	need := func(name string) string {
 		v := os.Getenv(name)
@@ -105,16 +153,17 @@ func liveStack(t *testing.T) (*server.Server, uint32, *lab.Credentials, string) 
 	keys := &lab.Credentials{AccessKey: need("AWS_ACCESS_KEY_ID"), SecretKey: need("AWS_SECRET_ACCESS_KEY"), Region: or("AWS_REGION", "us-east-1")}
 	bucket := need("DELTAV_LAB_BUCKET")
 	pool := or("DELTAV_LAB_POOL", "main")
-	port := liveNumber(t, "DELTAV_LAB_PORT", "80")
 
 	listen := freePort(t)
 	s := daemon(t)
 	postAPI(t, s, "/api/v1/vast", map[string]any{
 		"name": "live", "host": host, "user": user, "password": password, "insecure": os.Getenv("DELTAV_LAB_INSECURE") == "1",
 	})
-	postAPI(t, s, "/api/v1/targets", map[string]any{
-		"name": "live", "cluster": "live", "pool": pool, "port": port, "listen_port": listen,
-	})
+	target := map[string]any{"name": "live", "cluster": "live", "pool": pool, "port": mode.port, "listen_port": listen}
+	if mode.tls != nil {
+		target["tls"] = mode.tls
+	}
+	postAPI(t, s, "/api/v1/targets", target)
 	for name, c := range cnodeRows(t, s) {
 		t.Logf("CNode %s: healthy %v, hosts %d of the pool's VIPs", name, c.Healthy, c.VIPs)
 	}

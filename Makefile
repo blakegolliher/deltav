@@ -108,6 +108,12 @@ integration: envoy
 # (us-east-1), DELTAV_LAB_INSECURE=1 for a self-signed VAST certificate, and
 # DELTAV_LAB_S3_ENDPOINT, the DNS name clients use for the pool: with it the
 # bucket is also tried in the host name.
+#
+# With DELTAV_LAB_TLS_PORT (443) everything runs again over TLS to the VIPs:
+# verified, if DELTAV_LAB_TLS_CA_FILE names the CA bundle the certificate
+# chains to, and unverified if DELTAV_LAB_TLS_INSECURE=1; both if both are
+# set. DELTAV_LAB_TLS_SERVER_NAME is the name sent and looked for in the
+# certificate (default: DELTAV_LAB_S3_ENDPOINT).
 live: envoy
 	@test -n "$(ENV)" -a -r "$(ENV)" || { echo "usage: make live ENV=<file>; see the Makefile" >&2; exit 1; }
 	@set -a && . "$(ENV)" && set +a && \
