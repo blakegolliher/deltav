@@ -8,7 +8,9 @@ became of each. The first half is what is still open.
 On 2026-11-19 the first run against a real VAST cluster passed, and then showed that the fix
 for finding 3 had been half wrong: four kinds of request that VAST serves went past a rule
 blocking them. Those are fixed and the live test now looks for more (DESIGN.md amendments 65
-to 69).
+to 69). The same day TLS to the VIPs ran for the first time, on real Envoy and against the
+cluster: it works, except that its default way of trusting a certificate had never been able
+to (70 to 72).
 
 How things here were established: **seen** means observed on real Envoy 1.40.2, **tested**
 means a unit test covers it, **read** means from reading code only.
@@ -17,7 +19,10 @@ means a unit test covers it, **read** means from reading code only.
 
 ### Never run
 
-- **TLS to the VIPs** has never run through real Envoy (DESIGN.md amendment 6).
+- **TLS to a cluster with a certificate of its own.** TLS to the VIPs runs (amendment 70),
+  but the one real cluster it ran against presents VAST's factory certificate. Verifying a
+  certificate issued for the pool's own DNS name, by a public or a company authority, was
+  done against test backends only. Client certificates towards VAST are not supported.
 - **Rate rules on a second cluster.** How rules read a request (bucket in the path or the
   host name, which access key) was matched to one cluster: VAST 5.5, DNS service on, one DNS
   suffix. `make live` asks a cluster the same questions and fails if a rule can be avoided;
@@ -31,6 +36,15 @@ means a unit test covers it, **read** means from reading code only.
   not been looked at in a browser by anyone: it is covered by the template tests only.
 - **Rate rules with real clients** have been tried with the AWS CLI only, and not for multipart
   transfers or listings, which the fake backend lacks.
+
+### Limits of TLS to the VIPs
+
+- A TLS target must name a CA bundle file that exists at the same path on every client host,
+  or verify nothing (71). Envoy cannot be told to use a host's own trust store, and Delta-V
+  does not find the file for it.
+- A request Envoy answers itself because VAST gave no answer is still counted among the
+  target's 503s, and so among its VIPs'. The target says that it is happening and why (72);
+  the counts do not tell the two kinds of 503 apart.
 
 ### Limits of rate rules that remain
 
@@ -93,6 +107,11 @@ By design, or by what Envoy's filter does. Each is said in the README or `rule s
 
 Found along the way, and not by the review:
 
+- **A TLS target with no CA file was rejected by every Envoy** (2026-11-19): it relied on a
+  setting Envoy does not implement. Never noticed, because TLS had never been run. Now refused
+  when the target is added, with what to give in its place (71). And a target whose
+  certificate cannot be verified said nothing but 503; it now says why (72).
+
 - **Four ways round a rule, on real VAST** (2026-11-19): the slash after the bucket written
   `%2F`; the bucket named in the host name; `credential=` in lower case; a presigned URL sent
   with a second, false `Authorization` header. VAST served each, and a rule blocking the
@@ -108,8 +127,8 @@ Found along the way, and not by the review:
 
 Also checked again on real Envoy after the changes: the daemon stopped for 35 s of a 75 s run
 under a rule of 20 a second on two Envoys let 1,541 through, 20.5 a second, with no failed
-connection (56). The whole suite against Envoy is thirteen tests, all passing, and the two
-against a real cluster pass as well (65).
+connection (56). The whole suite against Envoy is fourteen tests, all passing, and the two
+against a real cluster pass as well, over plain HTTP and over TLS (65, 70).
 
 Decided by the owner on 2026-11-19: outlier ejection stays as it is, VAST's own
 `503 SlowDown` included (64).

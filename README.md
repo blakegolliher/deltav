@@ -15,8 +15,8 @@ daemon and the clients' Envoys; a test harness (`dvlab`) provides fake S3 backen
 API and a load generator. See [docs/DESIGN.md](docs/DESIGN.md).
 
 **What is still open is listed in [docs/OPEN_ITEMS.md](docs/OPEN_ITEMS.md)**: what a review on
-2026-11-18 found and how each finding was settled, and what has still never been run (TLS to the
-VIPs through real Envoy, the units under systemd).
+2026-11-18 found and how each finding was settled, what the first runs against a real cluster
+turned up, and what has still never been run (the units under systemd).
 
 The binary is `deltav`, also installed as `dv`; the two behave identically.
 
@@ -125,6 +125,30 @@ healthy CNodes. The daemon reads the cluster every 10 s with four GETs; it can i
 but GETs and the token call. If VAST is unreachable, or the daemon restarts, Envoys keep being
 served the last known endpoints. TLS verification of the VAST API is on unless the cluster is
 added with `--insecure`.
+
+### TLS to the VIPs
+
+```sh
+deltav target add s3 --cluster lab --pool main --port 443 --listen-port 9000 \
+    --tls --tls-server-name s3.example.com --tls-ca-file /etc/pki/tls/certs/ca-bundle.crt
+```
+
+Envoy then speaks TLS to the VIPs; clients still speak plain HTTP to `127.0.0.1:9000`.
+
+- **`--tls-server-name`** is sent as SNI and must be a name the certificate is for. A wildcard in
+  the certificate covers one label, as everywhere.
+- **`--tls-ca-file`** is the path, on the client hosts, of the CA bundle the certificate must
+  chain to. It is required: Envoy cannot be told to use "the host's trust store" and has to be
+  given the file. A host's own bundle is `/etc/ssl/certs/ca-certificates.crt` on Debian and
+  Ubuntu and `/etc/pki/tls/certs/ca-bundle.crt` on RHEL and Fedora; a fleet of both needs one
+  path that exists on all of them.
+- **`--tls-insecure`** in place of the CA file verifies nothing. It is for a lab cluster that
+  still has VAST's factory certificate, which is for `*.vastdata.com` and no name of yours.
+- **When it is wrong**, every request gets a `503` from Envoy that says only "upstream connect
+  error", and Envoy's log says nothing. The reason is in `deltav target list`, the TUI and the
+  web UI's overview: for example *NO ANSWER FROM VAST for 412 requests in the last minute:
+  VAST's certificate is not for the target's server name; it is for …*. The same line appears
+  for any target Envoys cannot get an answer from: nothing listening, connections cut, timeouts.
 
 ## Limits and drain
 
@@ -349,7 +373,7 @@ is required when it is bound elsewhere). Stats take `?window=1m|5m|1h`.
 | Path | What it returns |
 |---|---|
 | `/api/v1/overview` | Per target: endpoints served, requests in flight, request and byte rates, status counts with 403 and 503 broken out, p50/p90/p99, and apart from all of those the requests rate rules refused. Fleet counts. |
-| `/api/v1/targets` | The targets and endpoints being served to Envoys, and how each VAST target resolved. `POST` adds one, `DELETE /api/v1/targets/{name}` removes it. |
+| `/api/v1/targets` | The targets and endpoints being served to Envoys, and how each VAST target resolved; and for a target whose requests Envoys are answering themselves because VAST gives no answer (`no_answer`), why, on which client last, and how many in the last minute. `POST` adds one, `DELETE /api/v1/targets/{name}` removes it. |
 | `/api/v1/vast` | Attached VAST clusters and the state of their polling. `POST` attaches one (the password is never returned), `DELETE /api/v1/vast/{name}` detaches it; `/api/v1/vast/{name}/pools` lists its VIP pools. |
 | `/api/v1/cnodes` | Per CNode: state from VAST, whether it is drained, VIPs hosted, requests in flight against each target's limit, and the same stats, with a row per VIP beneath. |
 | `/api/v1/targets/{name}/limit` | `PUT` sets a target's per-CNode limit and mode; `DELETE` removes it. |

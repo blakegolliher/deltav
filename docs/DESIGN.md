@@ -54,7 +54,8 @@ cobra 1.10 · Prometheus client 1.25 · Bubble Tea / Lip Gloss v2.1.1, Bubbles v
    (`127.0.0.1`). Each TLS target gets a server name, with verification on by default and a
    per-target opt-out (as for the VAST API). Trust comes from a CA file if the target names one,
    otherwise from the client host's own trust store (`system_root_certs`): no single bundle path
-   exists on both Debian and RHEL families. *Not yet exercised against a real Envoy.*
+   exists on both Debian and RHEL families. *Not yet exercised against a real Envoy.* (It was
+   on 2026-11-19, and the trust-store half was wrong: see 70 and 71.)
 7. **LRS "connections" are in-flight requests.** In the Envoy source, `total_requests_in_progress`
    is the per-host `rq_active` gauge. Idle keep-alive sockets are invisible to it, so it is labeled
    that way. The upstream idle timeout drops from 1 h to 5 min to bound the sockets it can't count.
@@ -534,6 +535,42 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     test is the instrument: run it against a cluster before trusting rules about buckets or
     access keys there. The script still lets a request through unlimited if the script
     itself fails, which is a choice for availability that a blocked rule inherits.
+70. **TLS to the VIPs, run at last** (2026-11-19; replaces the last sentence of 6). On real
+    Envoy against backends that speak only TLS (`TestTLSToTheBackends`): a target with the
+    authority's file and the certificate's name passes every request, as does one whose name
+    the certificate covers with a wildcard, and one with verification off. A name the
+    certificate is not for, a name two labels under its wildcard, another authority's file,
+    and the host's own bundle are each refused, every request, with nothing reaching a
+    backend; the backends were asked (by SNI) for exactly the names the targets were given.
+    On the lab's VAST 5.5, port 443, TLS 1.2: `make live` passes in full over TLS both
+    unverified and verified, 200 of 200 round trips each, as over plain HTTP. The lab presents
+    VAST's factory certificate (names `*.vastdata.com`, `vms.vastdata.com` and a bare `*`,
+    signed by VAST's own root, the same on all six VIPs), so "verified" there means against
+    that root and the name `vms.vastdata.com`. Asked for the pool's own DNS name the same
+    setup refuses it, 8 requests of 8: a bare `*` covers nothing, and `*.vastdata.com` one
+    label.
+71. **There is no "host's trust store" in Envoy** (replaces part of 6). 6 chose
+    `system_root_certs` for a TLS target with no CA file. The API has the field; Envoy 1.40
+    does not implement it (it is marked so in the API's source, which nobody read), and
+    rejects a cluster that verifies names without a CA: every Envoy refused the whole update
+    the first time one was tried. So this default never worked. A TLS target now needs a CA
+    file, a path on the client hosts, or verification switched off; `target add` and the web
+    form refuse it otherwise and name the usual bundle paths, and a target stored the old way
+    is not served and says why. Not done: finding the host's bundle by itself. It would take
+    a static secret defined where each Envoy starts, since one config serves the whole fleet
+    and the path differs by distribution; an operator with a mixed fleet has to provide one
+    path that exists everywhere.
+72. **A target that gets no answer says why.** A wrong CA file or server name gives every
+    request a 503 that Envoy made up. The client is told "upstream connect error", Envoy logs
+    nothing at its usual level, and the daemon counted these as 503s of the VIPs, which reads
+    as VAST throttling. Envoy's access log does carry the reason. The daemon now keeps, per
+    target, the latest request an Envoy answered for want of an answer from the target (any
+    5xx whose response code details are not `via_upstream`, leaving out rate rules and the
+    connection limit, which are deliberate), in words, with how many there were in the last
+    minute: `no_answer` on `/api/v1/targets`, shown by the CLI, the TUI and the web overview
+    for five minutes after the last one. For a certificate rejected by name it gives the
+    names the certificate is for, which Envoy supplies. The counts are unchanged: such a 503
+    is still among the target's 503s.
 
 ## Known gaps (POC)
 
