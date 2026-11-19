@@ -239,7 +239,12 @@ deltav rule operations           # the operation names a rule can use
   server must when it answers before reading the body; the client's retry opens another.
 - **Several rules.** A request that matches several rules must be allowed by each. At most 4
   rules can limit one request: if it matches more, the first 4 in the order of `rule list`
-  count. A blocked rule refuses wherever it comes in the order.
+  count. A blocked rule refuses wherever it comes in the order. A request that one rule
+  refuses has already been counted by the rules before it in that order.
+- **What a rule does not cover.** A prefix rule matches a listing by the listing's own
+  `prefix`, so listing a parent prefix still shows the names of keys under a blocked one (not
+  their contents). And each operation is its own: a rule on `DeleteObject` leaves a batch
+  delete, `DeleteObjects`, alone, which is how SDKs delete many keys.
 - **When a change takes effect.** On the next request of every connection, open or new: within
   a moment of the command returning, on every client host.
 - **Whether the burst holds.** Every Envoy that has a count open must be allowed at least one
@@ -258,7 +263,19 @@ deltav rule operations           # the operation names a rule can use
   that limits are not enforced until the daemon is back. A count first opened while the daemon
   is away is not limited either.
 
-How the AWS CLI takes a refusal, tried with version 2.15.31 against these rules:
+Tried against a real cluster (VAST 5.5) through Envoy, with the AWS CLI 2.15.31 and boto3
+1.41.3 at their default settings: multipart uploads and ranged downloads of 64 MiB, server-side
+copies, listings page by page, presigned URLs, single and batch deletes, and boto3 addressing
+the bucket by host name all work, and every request was counted under the operation, bucket
+and access key it should be. Under a limit the two clients differ:
+
+| Limit | AWS CLI, default | AWS CLI, `AWS_RETRY_MODE=adaptive AWS_MAX_ATTEMPTS=10` | boto3, default |
+|---|---|---|---|
+| `UploadPart` at 2 a second, a 64 MiB upload in 8 parts | gives up after 3 s (`reached max retries: 2`) and aborts the upload, leaving nothing behind | done in 6 s | done in 3 s |
+| `List*` at 1 a second, 300 keys in 6 pages | gives up on a page | done in 13 s | done in 6 s |
+
+How the AWS CLI takes a refusal, in more detail, tried with version 2.15.31 against these rules
+and test backends:
 
 - It reads Envoy's answer as S3 throttling (`SlowDown`) and retries it, but in its default
   mode only twice, each after less than a second, and it does not wait for `Retry-After`. Against a rule
@@ -276,9 +293,8 @@ How the AWS CLI takes a refusal, tried with version 2.15.31 against these rules:
 
 A per-hour limit refuses for long stretches, longer than any SDK keeps retrying.
 
-Rules work on path-style requests, which is what clients of a loopback address send anyway. The
-`source_ip` of tollbooth's rules has no counterpart here: Envoy sits on the client host, so the
-source is always loopback. `--per client` is the nearest thing.
+The `source_ip` of tollbooth's rules has no counterpart here: Envoy sits on the client host, so
+the source is always loopback. `--per client` is the nearest thing.
 
 ## Watch it
 

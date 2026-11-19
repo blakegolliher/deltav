@@ -34,8 +34,10 @@ means a unit test covers it, **read** means from reading code only.
 - **The web UI** has been used by its owner in one browser. What this round added to it (a
   "Burst not kept" note on a rule, a "Left out" note on a target, new wording in two hints) has
   not been looked at in a browser by anyone: it is covered by the template tests only.
-- **Rate rules with real clients** have been tried with the AWS CLI only, and not for multipart
-  transfers or listings, which the fake backend lacks.
+- **Rate rules with other clients.** The AWS CLI and boto3 have been run against the real
+  cluster through rules: multipart transfers, copies, listings, presigned URLs, batch deletes,
+  the bucket in the host name (amendment 73). No other SDK has, nor these two over TLS, nor
+  anything at volume: the largest transfer was 64 MiB.
 
 ### Limits of TLS to the VIPs
 
@@ -49,6 +51,12 @@ means a unit test covers it, **read** means from reading code only.
 ### Limits of rate rules that remain
 
 By design, or by what Envoy's filter does. Each is said in the README or `rule set --help`.
+
+- A prefix rule does not match a listing of a parent prefix, so the names of keys under a
+  blocked prefix can still be listed from above it (73).
+- A request refused by one rule has been counted, as let through, by the rules before it in
+  the order (seen: 73).
+- There can be at most 64 rules.
 
 - A request that names more than one access key is refused with `400` while any rule looks at
   access keys (68). No ordinary client sends one.

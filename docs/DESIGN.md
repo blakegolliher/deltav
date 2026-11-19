@@ -571,6 +571,34 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     for five minutes after the last one. For a certificate rejected by name it gives the
     names the certificate is for, which Envoy supplies. The counts are unchanged: such a 503
     is still among the target's 503s.
+73. **Real clients, real cluster, through rules** (2026-11-19, by hand; one Envoy with two
+    workers on the lab's pool over plain HTTP). The AWS CLI 2.15.31 and boto3 1.41.3, both at
+    their defaults, with a rule per operation whose limit nothing could reach, so that each
+    rule's count says how the script classified what the client sent:
+    - A 64 MiB `aws s3 cp` up is 1 CreateMultipartUpload, 8 UploadPart, 1
+      CompleteMultipartUpload; down, 1 HeadObject and 8 ranged GetObject. A server-side copy
+      is 1 HeadObject, 1 GetObjectTagging, 1 CreateMultipartUpload, 8 UploadPartCopy, 1
+      CompleteMultipartUpload. `aws s3 rm --recursive` is a ListObjectsV2 and a DeleteObject
+      for each key; boto3's `delete_objects` is one DeleteObjects for 303 keys. A presigned
+      URL is a GetObject under the key that signed it. boto3 did the same things with the
+      same counts, less the tagging read on a copy, which it does not make. Nothing was
+      classified as anything else, and nothing as unknown: a rule on everything counted
+      exactly the sum of the others.
+    - boto3 with `addressing_style: virtual`, sent to Envoy as a client would be that
+      resolves the cluster's S3 name to loopback: served, counted under the bucket named in
+      the host, and refused by a block on that bucket (67, with a real SDK).
+    - Under `UploadPart` at 2 a second with a burst of 2: the CLI at its defaults fails in 3 s
+      (15 attempts at parts, 11 refused, "reached max retries: 2") and aborts the upload; no
+      unfinished upload was left on the cluster. With adaptive retries and 10 attempts it
+      finishes in 6 s (13 attempts, 5 refused). boto3 at its defaults finishes in 3 s (18
+      attempts, 10 refused), in adaptive mode in 5 s (12 attempts, 4 refused).
+    - Under `List*` at 1 a second, 300 keys at 50 a page: the CLI at its defaults fails on a
+      page; adaptive, 13 s. boto3 at its defaults, 6 s.
+    - A block on a prefix refuses reads, writes, deletes and listings of that prefix or a
+      longer one, however the key is spelled; a listing of the parent prefix is not the
+      rule's, and shows the names under it.
+    What this did not show: any other SDK; these clients over TLS; anything at a rate that
+    would stress Envoy or the cluster (the uploads were 64 MiB).
 
 ## Known gaps (POC)
 
