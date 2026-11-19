@@ -5,6 +5,11 @@ that day. All sixteen were dealt with the same day: fourteen fixed, one made vis
 cannot be fixed (5), one accepted and documented (11). The second half of this file says what
 became of each. The first half is what is still open.
 
+On 2026-11-19 the first run against a real VAST cluster passed, and then showed that the fix
+for finding 3 had been half wrong: four kinds of request that VAST serves went past a rule
+blocking them. Those are fixed and the live test now looks for more (DESIGN.md amendments 65
+to 69).
+
 How things here were established: **seen** means observed on real Envoy 1.40.2, **tested**
 means a unit test covers it, **read** means from reading code only.
 
@@ -13,14 +18,13 @@ means a unit test covers it, **read** means from reading code only.
 ### Never run
 
 - **TLS to the VIPs** has never run through real Envoy (DESIGN.md amendment 6).
-- **A real VAST cluster with a real bucket.** `make live` was run on 2026-11-18 and got as far
-  as it could: the daemon read the cluster, Envoy took the config, and all 200 uploads of the
-  run reached VAST through Envoy, spread over three CNodes and six VIPs. Every one was
-  answered `404 NoSuchBucket`: the bucket name the test was given does not exist for the keys
-  it was given. No object was created. It needs the right bucket name, and then tells us
-  what is still not known about VAST behind Envoy: whether signatures verify with Envoy's
-  lower-case header names and its `x-forwarded-proto: http`, and how VAST reads an encoded
-  bucket name or a path that starts `//` (amendment 61).
+- **Rate rules on a second cluster.** How rules read a request (bucket in the path or the
+  host name, which access key) was matched to one cluster: VAST 5.5, DNS service on, one DNS
+  suffix. `make live` asks a cluster the same questions and fails if a rule can be avoided;
+  it has been run against that one cluster only. Not tried anywhere: signature version 2,
+  browser form uploads (their access key is in the body, so to a rule they have none), other
+  methods than GET on the odd paths, a cluster with its DNS service off or with several
+  suffixes (amendment 69).
 - **The systemd units** have not been run under systemd.
 - **The web UI** has been used by its owner in one browser. What this round added to it (a
   "Burst not kept" note on a rule, a "Left out" note on a target, new wording in two hints) has
@@ -31,6 +35,14 @@ means a unit test covers it, **read** means from reading code only.
 ### Limits of rate rules that remain
 
 By design, or by what Envoy's filter does. Each is said in the README or `rule set --help`.
+
+- A request that names more than one access key is refused with `400` while any rule looks at
+  access keys (68). No ordinary client sends one.
+- A target that is not on a VAST pool, or whose cluster's DNS settings cannot be read, has no
+  host names to go by: a bucket named in the host name is then not seen by rules (67). The
+  target's status says when the read fails.
+- If the rule script itself fails on a request, the request goes through unlimited and Envoy
+  logs the error. That holds for blocked rules too.
 
 - At most 4 rules can limit one request (amendment 53). More slots are a constant away, at the
   price of a filter each on every request.
@@ -58,19 +70,13 @@ By design, or by what Envoy's filter does. Each is said in the README or `rule s
 - `internal/cli` has its own HTTP client and API types where `internal/apiclient` would do.
 - The rate, MB/s, latency and age formatters exist three times (`tui`, `webui`, `cli`).
 
-### To confirm with the owner
-
-- **Outlier ejection on VAST's own `503 SlowDown`.** Today five 5xx in a row eject a VIP for a
-  while, which moves load onto the others when VAST is only asking clients to slow down. The
-  answer given on 2026-11-18 could be read either way, so nothing was changed.
-
 ## What the review found, and what became of it
 
 | # | Finding | Outcome | Established |
 |---|---|---|---|
 | 1 | A rule change did not reach connections already open: rules changed the listener, which Envoy applies to new connections only. | Fixed. Rules travel in the route (52 to 54). | Seen: one connection, rule added, changed and removed, each in effect on its next request (`TestRuleChangeReachesOpenConnections`). |
 | 2 | Slow rules could be beaten by pausing: a count was given up after 30 s of silence and came back with a full burst. | Fixed. A count is kept until its tokens would have refilled (58). | Seen: 12 an hour, burst 3; 4 passed, then none after 40 s of silence (`TestSlowRuleHoldsThroughAPause`). |
-| 3 | An encoded bucket name slipped past bucket filters and blocked rules; a request with no bucket was not counted by a per-bucket rule. | Fixed in the script (61). | Tested in the script. VAST's own reading of such paths: not tried. |
+| 3 | An encoded bucket name slipped past bucket filters and blocked rules; a request with no bucket was not counted by a per-bucket rule. | Fixed in the script (61), then fixed again against real VAST, which reads paths otherwise than 61 supposed (66 to 68). | Seen: of 54 unusual requests for one object, VAST serves 18, and a rule blocking the object refuses all 18 (`TestLiveRulesReadRequestsAsVASTDoes`). |
 | 4 | One empty answer from VAST plus two operator commands emptied a target. | Fixed. The hold counts polls (63). | Tested. |
 | 5 | Low-rate rules shared by many Envoys admitted several times their limit. | The rate is now exact: 400 Envoys on 20 an hour are given 20 an hour. The burst cannot be: each Envoy needs one. The rule says so (`holds`). | Tested. |
 | 6 | Refused requests were counted as the target's own requests and 503s. | Fixed. Counted apart, and each kept on record (57). | Seen: 4,322 requests and no 5xx for the target, 27,489 refused beside them. |
@@ -87,6 +93,13 @@ By design, or by what Envoy's filter does. Each is said in the README or `rule s
 
 Found along the way, and not by the review:
 
+- **Four ways round a rule, on real VAST** (2026-11-19): the slash after the bucket written
+  `%2F`; the bucket named in the host name; `credential=` in lower case; a presigned URL sent
+  with a second, false `Authorization` header. VAST served each, and a rule blocking the
+  bucket or the access key did not apply. And `//bucket/key`, which VAST answers as a list of
+  buckets, was read as a GetObject. Fixed (66 to 68), tested in the script, and seen fixed
+  on the cluster.
+
 - **A listener rendered to different bytes from one moment to the next** whenever it held a
   quota filter, so about half of all config rebuilds pushed a listener Envoy took for changed
   and replaced (55). Fixed and tested.
@@ -95,4 +108,8 @@ Found along the way, and not by the review:
 
 Also checked again on real Envoy after the changes: the daemon stopped for 35 s of a 75 s run
 under a rule of 20 a second on two Envoys let 1,541 through, 20.5 a second, with no failed
-connection (56). The whole suite against Envoy is twelve tests, all passing.
+connection (56). The whole suite against Envoy is thirteen tests, all passing, and the two
+against a real cluster pass as well (65).
+
+Decided by the owner on 2026-11-19: outlier ejection stays as it is, VAST's own
+`503 SlowDown` included (64).

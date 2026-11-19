@@ -121,7 +121,7 @@ deltav target list
 ```
 
 Every Envoy then listens on `127.0.0.1:9000` and balances across the pool's VIPs that sit on
-healthy CNodes. The daemon reads the cluster every 10 s with three GETs; it can issue nothing
+healthy CNodes. The daemon reads the cluster every 10 s with four GETs; it can issue nothing
 but GETs and the token call. If VAST is unreachable, or the daemon restarts, Envoys keep being
 served the last known endpoints. TLS verification of the VAST API is on unless the cluster is
 added with `--insecure`.
@@ -185,8 +185,18 @@ deltav rule operations           # the operation names a rule can use
   `--access-key`, `--bucket` and `--prefix` are filters; a request must pass all that are given.
   A prefix is compared with the object key, or with a listing's `prefix` parameter. The access
   key comes from the request's signature (header or presigned URL, SigV4 or SigV2); `-` is a
-  request that carries none. The bucket is taken as a server would take it: percent-decoded,
-  and past any extra leading slashes.
+  request that carries none.
+- **How a request is read.** As VAST reads it, so that a request cannot be put in a way a rule
+  takes for one bucket and VAST serves from another. The path is percent-decoded once and then
+  split, so `/arch%69ve/k` and `/archive%2Fk` are both key `k` in bucket `archive`. A bucket
+  named in the host name counts the same as one in the path: for a target on a VAST pool the
+  daemon reads the cluster's DNS suffix, and under it VAST takes the bucket from the host name
+  (`archive.<pool>.<suffix>` or `archive.<suffix>`). A path that starts `//` has no bucket: VAST
+  answers it as a listing of buckets. A request that names more than one access key (two
+  `Authorization` headers, or a presigned URL with a header as well) is refused with `400
+  InvalidRequest` while any rule looks at access keys, because which key VAST would act on is
+  not for a rule to guess. All of this was established against one cluster, VAST 5.5; `make
+  live` checks it against yours.
 - **The limit.** One of `--per-second`, `--per-minute`, `--per-hour`, or `--blocked`. `--burst`
   is how many may pass at once after a quiet spell; by default the limit's own number, so 20 per
   hour lets 20 through together.
@@ -328,7 +338,8 @@ Then start Envoy and the load generator as above and open `http://127.0.0.1:1808
 `make integration` runs the same arrangement as tests, with real Envoy processes, including one
 where a mock VAST (a real cluster's sanitized responses) supplies the endpoints. `make live
 ENV=<file>` does it on real equipment: a real VAST cluster, real Envoy, and round trips against a
-real bucket; see the Makefile.
+real bucket; then it asks VAST for one object in about fifty unusual ways and checks that
+every way VAST serves is caught by a rule that should catch it. See the Makefile.
 
 ## HTTP API and metrics
 

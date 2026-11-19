@@ -454,7 +454,8 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     everyone who asks. A changed rule reaches the quota service before Envoy, so that the
     first report of its count finds the rule known; and one lock is held across a rule change
     and its undoing.
-61. **The bucket is what a server would take it to be.** The script compared the bucket as
+61. **The bucket is what a server would take it to be** (how, and the last sentence, are
+    replaced by 66). The script compared the bucket as
     the bytes on the wire, while it decoded the key: `/arch%69ve/k` was not bucket `archive`,
     and slipped a blocked rule. It now decodes the bucket once and skips empty segments ahead
     of it. And a count's name is never empty: a rule counting per bucket counts a request
@@ -474,8 +475,65 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
 64. **Decided on 2026-11-18, and left as they are.** Two Envoy worker threads by default in
     the client unit (40), to be tuned when there is a reason. The S3 operation table stays
     under Apache-2.0 with tollbooth's notice. Outlier ejection on five consecutive 5xx (3, 17)
-    is unchanged: the owner's answer to that question could be read either way, so nothing
-    was changed on the strength of it, and it is still to be confirmed.
+    is unchanged; the owner confirmed on 2026-11-19 that it is to stay so, VAST's own
+    `503 SlowDown` included.
+
+### The first run against a real cluster (2026-11-19)
+
+65. **`make live` passes.** VAST 5.5, three CNodes, six VIPs in the pool, plain HTTP to port
+    80, one Envoy with two workers. 200 round trips of 1 MiB (PUT, GET with the content
+    checked, DELETE) through the loopback listener: all verified, in 2.4 s, p50 15 ms, p99
+    38 ms, 196 to 208 requests to each CNode, and the daemon's counts per CNode add up to
+    exactly what the load generator sent. So VAST accepts requests as Envoy forwards them:
+    lower-case header names, `x-forwarded-proto` added, the path untouched. The run before
+    it failed on a bucket name that did not exist, which is how it is known that a `404
+    NoSuchBucket` from VAST comes back through Envoy as it is.
+66. **A rule reads a request as VAST does** (replaces the how of 61). 61 made the script read
+    the bucket "as a server would", by reasoning. Asked of the real server, the reasoning was
+    half wrong, and four requests that VAST served went past a rule that blocked them. The
+    live test now sends one object's GET in every unusual form we know of, with no rule and
+    then under a rule blocking it by bucket and prefix, by access key, and by operation; any
+    form VAST serves under a block fails the test. What VAST 5.5 was seen to do, and the
+    script now does:
+    - It decodes the path once and then splits it. `/b%2Fk` is key `k` in bucket `b`; the
+      script took `b/k` for the bucket. A name encoded twice is not decoded twice.
+    - A path that starts `//` has no bucket, and a GET of it lists buckets, whatever follows.
+      61 skipped the empty segment and read on, which made a bucket listing look like a
+      GetObject and would have let it past a rule on `ListBuckets`.
+    - Nothing else is tidied: `/b//k` is key `/k`, dot segments are part of a key, a bucket
+      name is matched as written.
+    - It takes the bucket from the host name where it can (67).
+    - It finds `credential=` in an `Authorization` header in any letter case; the script
+      looked for `Credential=` and read anything else as no access key.
+    - Given a presigned URL and an `Authorization` header together it acts on the URL; the
+      script believed the header (68).
+67. **The bucket in the host name.** VAST serves `GET /k` with `Host: b.<pool>.<suffix>` or
+    `Host: b.<suffix>` as key `k` of bucket `b`, where `<suffix>` is `domain_suffix` of
+    `GET /api/dns/` and `<pool>` a VIP pool's `domain_name`. `<pool>.<suffix>` itself, the
+    suffix alone, and every name not under the suffix are read by path. The domain is
+    compared without regard to case, port or a final dot; the bucket is taken as written.
+    The daemon reads `dns/` with each poll (a fourth GET) and gives the script every suffix
+    and every pool label, per target, saved with the endpoint cache so that a restart
+    without VAST still knows them. A failed read of `dns/` fails nothing else: the names last
+    read stay, and the target's status says so (`bucket_hosts_problem`). A client need not
+    resolve such a name to send it; a `Host` header is enough, which is why this could not be
+    left as a thing clients behind a loopback proxy do not do. Static targets have no cluster
+    to ask and are read by path only.
+68. **A request that names several access keys is refused.** Two `Authorization` headers, two
+    `Credential` fields in one, a presigned URL with a header: VAST picks one by rules of its
+    own (and rejected most such requests, but not all). The script collects every access key
+    a request names. If there is more than one and any rule looks at access keys (a filter,
+    or `per: access_key`), it answers `400 InvalidRequest` itself and counts the request as
+    refused, under `(several access keys)` where a rule's name would stand. With no such rule
+    the request is treated as any other. Mimicking VAST's choice would have been exact for
+    this version and wrong without notice for the next.
+69. **What reading as VAST does rests on.** One cluster, one version, DNS service enabled, one
+    suffix. Not seen: signature version 2, browser form uploads (the access key is in the
+    body, which the script does not read: such a request has no access key to a rule), other
+    methods than GET on the odd paths, a cluster with DNS off or several suffixes. The live
+    test is the instrument: run it against a cluster before trusting rules about buckets or
+    access keys there. The script still lets a request through unlimited if the script
+    itself fails, which is a choice for availability that a blocked rule inherits.
 
 ## Known gaps (POC)
 
