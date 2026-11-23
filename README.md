@@ -14,6 +14,11 @@ what the fleet and the CNodes are doing.
 </p>
 <p align="center"><em>The web UI's Fleet page, one of its four; see <a href="#watch-it">Watch it</a>.</em></p>
 
+<p align="center">
+  <img src="docs/img/tui-overview.png" alt="The terminal UI's Overview: three Envoys in sync, a rate rule refusing 139 requests a second, and one target with its endpoints, requests in flight, rates, latency and limit" width="760">
+</p>
+<p align="center"><em>The same daemon in a terminal: <code>deltav tui</code>.</em></p>
+
 **Status: proof of concept; all eight milestones of the build plan are done, and request-rate
 rules have been added since.** The daemon reads healthy endpoints from VAST clusters (or takes a
 static list), serves them to Envoy over xDS and tracks every connected Envoy; it ingests Envoy's
@@ -351,6 +356,11 @@ enforce, `d` drains or undrains a CNode, `?` shows the notes on limits). `w` cyc
 between 1m, 5m and 1h; `q` quits. It follows the daemon's event stream and uses the terminal's
 own colors, so it suits light and dark themes. In a narrow terminal (it is usable at 80 by 24)
 a table leaves out its least needed columns, and says which, rather than cut its rows short.
+
+<p align="center">
+  <img src="docs/img/tui-cnodes.png" alt="The terminal UI's CNodes view: three CNodes, each with its state, VIPs, requests in flight against the limit, request rate, latency and 403 and 503 rates" width="760">
+</p>
+<p align="center"><em>The CNodes view, with requests in flight against a limit of 9.</em></p>
 
 All three take `--api` (default `http://127.0.0.1:18080`, or `DELTAV_API`) and, for a daemon
 that requires it, `DELTAV_API_TOKEN`. The list commands take `--json`.
