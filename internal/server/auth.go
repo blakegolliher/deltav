@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -83,7 +84,19 @@ func (g *guard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a request that changes something must come from this site", http.StatusForbidden)
 		return
 	}
-	if g.token == "" || g.open(r.URL.Path) || g.authenticated(r) {
+	if g.token == "" || g.open(r.URL.Path) {
+		g.next.ServeHTTP(w, r)
+		return
+	}
+	if expires, ok := g.authenticated(r); ok {
+		// A request the session let in ends with the session, so a live
+		// page's stream does not outlive it. The browser's reconnect then
+		// gets the 401 that sends the page to the login form.
+		if !expires.IsZero() {
+			ctx, cancel := context.WithDeadline(r.Context(), time.Now().Add(expires.Sub(g.now())))
+			defer cancel()
+			r = r.WithContext(ctx)
+		}
 		g.next.ServeHTTP(w, r)
 		return
 	}
@@ -140,13 +153,18 @@ func sameOrigin(r *http.Request) bool {
 	return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host)
 }
 
-func (g *guard) authenticated(r *http.Request) bool {
+// authenticated reports whether a request carries the token or a valid
+// session, and when that session ends (zero for the token, which does not).
+func (g *guard) authenticated(r *http.Request) (expires time.Time, ok bool) {
 	got := []byte(strings.TrimSpace(r.Header.Get("Authorization")))
 	if subtle.ConstantTimeCompare(got, []byte("Bearer "+g.token)) == 1 {
-		return true
+		return time.Time{}, true
 	}
 	c, err := r.Cookie(sessionCookie)
-	return err == nil && g.validSession(c.Value)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return g.validSession(c.Value)
 }
 
 // A session is "<expiry as Unix seconds>.<hex MAC of that, keyed with the
@@ -162,13 +180,18 @@ func (g *guard) mac(exp string) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-func (g *guard) validSession(v string) bool {
+// validSession returns a session's expiry if it is genuine and has not
+// expired.
+func (g *guard) validSession(v string) (time.Time, bool) {
 	exp, mac, ok := strings.Cut(v, ".")
 	if !ok || !hmac.Equal([]byte(mac), []byte(g.mac(exp))) {
-		return false
+		return time.Time{}, false
 	}
 	at, err := strconv.ParseInt(exp, 10, 64)
-	return err == nil && g.now().Before(time.Unix(at, 0))
+	if err != nil || !g.now().Before(time.Unix(at, 0)) {
+		return time.Time{}, false
+	}
+	return time.Unix(at, 0), true
 }
 
 // Login implements webui.Session: it checks a token typed into the login
