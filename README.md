@@ -1,9 +1,18 @@
+<p align="center">
+  <img src="docs/img/delta-v-logo.png" alt="Delta-V" width="600">
+</p>
+
 # Delta-V
 
 Delta-V is the control plane for a fleet of loopback Envoys that load-balance S3 traffic across
 the VIPs of one or more VAST clusters, with no proxy machines in the data path. It serves
 endpoints over xDS, collects telemetry from every Envoy over the streams Envoy opens, and shows
 what the fleet and the CNodes are doing.
+
+<p align="center">
+  <img src="docs/img/web-ui-fleet.png" alt="The web UI's Fleet page: three Envoys, each with its address, version, config state and request rate" width="900">
+</p>
+<p align="center"><em>The web UI's Fleet page, one of its four; see <a href="#watch-it">Watch it</a>.</em></p>
 
 **Status: proof of concept; all eight milestones of the build plan are done, and request-rate
 rules have been added since.** The daemon reads healthy endpoints from VAST clusters (or takes a

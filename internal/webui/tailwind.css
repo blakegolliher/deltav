@@ -71,7 +71,9 @@
   .sr { @apply sr-only; }
   .topbar { @apply sticky top-0 z-10 border-b border-line bg-surface; }
   .topbar-in { @apply mx-auto flex min-h-12 max-w-[1600px] flex-wrap items-center gap-x-6 gap-y-1 px-4 py-1.5; }
-  .brand { @apply text-base font-semibold tracking-tight; }
+  .brand { @apply inline-flex items-center gap-2 text-base font-semibold tracking-tight; }
+  /* The mark is drawn on its own dark ground, so it reads the same in both themes. */
+  .brand-mark { @apply size-6 rounded-md; }
   .nav { @apply flex gap-1; }
   .nav a { @apply rounded-md px-3 py-1.5 text-ink-2 hover:bg-sunken hover:text-ink; }
   .nav a[aria-current="page"] { @apply bg-sunken font-semibold text-ink; }

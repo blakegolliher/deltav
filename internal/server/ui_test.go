@@ -221,7 +221,7 @@ func TestUIPages(t *testing.T) {
 	if code, _, _ := page(t, s, "/nope"); code != http.StatusNotFound {
 		t.Errorf("/nope: status %d", code)
 	}
-	for _, f := range []string{"app.css", "app.js", "htmx.min.js", "hx-sse.min.js"} {
+	for _, f := range []string{"app.css", "app.js", "htmx.min.js", "hx-sse.min.js", "logo.png"} {
 		code, hdr, body := page(t, s, "/static/"+f)
 		if code != http.StatusOK || len(body) < 1000 || hdr.Get("Content-Type") == "" || hdr.Get("Cache-Control") != "no-cache" {
 			t.Errorf("/static/%s: %d, %d bytes, %v", f, code, len(body), hdr)

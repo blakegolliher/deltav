@@ -3,6 +3,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="htmx-config" content="includeIndicatorCSS:false">
+<link rel="icon" type="image/png" href="/static/logo.png?v={{.Assets}}">
 <link rel="stylesheet" href="/static/app.css?v={{.Assets}}">
 <script src="/static/app.js?v={{.Assets}}"></script>
 {{end}}
@@ -20,7 +21,7 @@
   <a class="skip" href="#main">Skip to content</a>
   <header class="topbar">
     <div class="topbar-in">
-      <a class="brand" href="/">Delta-V</a>
+      <a class="brand" href="/"><img class="brand-mark" src="/static/logo.png?v={{.Assets}}" alt="" width="24" height="24">Delta-V</a>
       <nav class="nav" aria-label="Views">
         {{range .Nav}}<a href="{{.URL}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}
       </nav>
@@ -94,7 +95,7 @@
 <body>
 <main class="login">
   <form method="post" action="/login" class="card login-card">
-    <h1 class="brand">Delta-V</h1>
+    <h1 class="brand"><img class="brand-mark" src="/static/logo.png?v={{.Assets}}" alt="" width="24" height="24">Delta-V</h1>
     <p class="hint">This daemon asks for its API token: the value of <code>DELTAV_API_TOKEN</code> it was started with.</p>
     {{if .Failed}}
     <div class="note note-bad" role="alert">{{badge "crit" "Refused"}}<p>That is not this daemon's token.</p></div>

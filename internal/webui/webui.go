@@ -36,7 +36,7 @@ import (
 //go:embed templates/*.html
 var templateFS embed.FS
 
-//go:embed static/app.css static/app.js static/htmx.min.js static/hx-sse.min.js
+//go:embed static/app.css static/app.js static/htmx.min.js static/hx-sse.min.js static/logo.png
 var staticFS embed.FS
 
 // DefaultInterval is how often an open page is brought up to date.
@@ -382,6 +382,7 @@ func writeEvent(w io.Writer, markup []byte) error {
 var contentTypes = map[string]string{
 	".css": "text/css; charset=utf-8",
 	".js":  "text/javascript; charset=utf-8",
+	".png": "image/png",
 }
 
 func (u *UI) static(w http.ResponseWriter, r *http.Request) {
