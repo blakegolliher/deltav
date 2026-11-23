@@ -95,6 +95,11 @@ type file struct {
 const (
 	stateFile = "state.json"
 	cacheFile = "served.json"
+	// fileVersion is the version of the state file this build writes, and
+	// the newest it opens: a newer file may hold what this build cannot
+	// represent, and its next save would drop it. A field added within a
+	// version is tolerated, and lost at the next save by a build without it.
+	fileVersion = 1
 )
 
 // Errors the API maps to HTTP statuses.
@@ -122,7 +127,7 @@ type Store struct {
 // Open loads the state from dir, creating the directory (mode 0700) if it
 // does not exist. An empty dir gives a store that is never written.
 func Open(dir string) (*Store, error) {
-	s := &Store{dir: dir, data: file{Version: 1}}
+	s := &Store{dir: dir, data: file{Version: fileVersion}}
 	if dir == "" {
 		return s, nil
 	}
@@ -145,6 +150,10 @@ func Open(dir string) (*Store, error) {
 	}
 	if err := json.Unmarshal(b, &s.data); err != nil {
 		return nil, fmt.Errorf("state file %s: %w", filepath.Join(dir, stateFile), err)
+	}
+	if s.data.Version > fileVersion {
+		return nil, fmt.Errorf("state file %s: written by a newer Delta-V (version %d); this build reads up to version %d",
+			filepath.Join(dir, stateFile), s.data.Version, fileVersion)
 	}
 	// Rules are checked when they are set; a file edited by hand, or written
 	// by a version that knew other operations, is checked again here.
