@@ -55,6 +55,25 @@ type Limit struct {
 	Mode     string `json:"mode"`
 }
 
+// normalizeLimit is the one reading of a limit, wherever it comes from: 0
+// connections per CNode is no limit, no mode is alert, and any other mode
+// than alert or enforce is refused (the poller would take it for alert while
+// the status showed it as given). It returns a copy.
+func normalizeLimit(l *Limit) (*Limit, error) {
+	if l == nil || l.PerCNode == 0 {
+		return nil, nil
+	}
+	n := *l
+	switch n.Mode {
+	case "":
+		n.Mode = ModeAlert
+	case ModeAlert, ModeEnforce:
+	default:
+		return nil, fmt.Errorf("%w: limit mode %q: want %s or %s", ErrInvalid, n.Mode, ModeAlert, ModeEnforce)
+	}
+	return &n, nil
+}
+
 // Drain names a CNode whose VIPs are withheld from Envoys.
 type Drain struct {
 	Cluster string `json:"cluster"`
@@ -159,6 +178,15 @@ func Open(dir string) (*Store, error) {
 	// by a version that knew other operations, is checked again here.
 	if err := ratelimit.Validate(s.data.Rules); err != nil {
 		return nil, fmt.Errorf("state file %s: %w", filepath.Join(dir, stateFile), err)
+	}
+	// So are limits. A mode that cannot be read is an error rather than
+	// guessed at: the operator's setting would change without a word.
+	for i, t := range s.data.Targets {
+		l, err := normalizeLimit(t.Limit)
+		if err != nil {
+			return nil, fmt.Errorf("state file %s: target %q: %w", filepath.Join(dir, stateFile), t.Name, err)
+		}
+		s.data.Targets[i].Limit = l
 	}
 	return s, nil
 }
@@ -306,6 +334,11 @@ func (s *Store) AddTarget(t Target, reserved map[uint32]string) error {
 		return fmt.Errorf("%w: a TLS target needs the path of a CA bundle on the client hosts to verify the certificate against (a host's own is at %s), or verification switched off",
 			ErrInvalid, caBundlePaths)
 	}
+	l, err := normalizeLimit(t.Limit)
+	if err != nil {
+		return err
+	}
+	t.Limit = l
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	found := false
@@ -359,23 +392,17 @@ func (s *Store) RemoveTarget(name string) error {
 }
 
 // SetTargetLimit sets a target's per-CNode connection limit, or removes it
-// if l is nil or its PerCNode is 0.
+// if l is nil or its PerCNode is 0. No mode is alert.
 func (s *Store) SetTargetLimit(name string, l *Limit) error {
-	if l != nil && l.PerCNode == 0 {
-		l = nil
-	}
-	if l != nil && l.Mode != ModeAlert && l.Mode != ModeEnforce {
-		return fmt.Errorf("%w: limit mode %q: want %s or %s", ErrInvalid, l.Mode, ModeAlert, ModeEnforce)
+	l, err := normalizeLimit(l)
+	if err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, t := range s.data.Targets {
 		if t.Name != name {
 			continue
-		}
-		if l != nil {
-			copied := *l
-			l = &copied
 		}
 		// A new slice: Targets() hands out the old one's elements.
 		targets := append([]Target(nil), s.data.Targets...)

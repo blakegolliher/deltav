@@ -216,3 +216,66 @@ func TestLimitsAndDrains(t *testing.T) {
 		t.Errorf("drains left behind: %+v", again.Drained())
 	}
 }
+
+// A limit means the same wherever it comes from: the limit call, a new
+// target, or the state file.
+func TestLimitsReadOneWay(t *testing.T) {
+	s := open(t, "")
+	if err := s.AddCluster(lab); err != nil {
+		t.Fatal(err)
+	}
+	withLimit := func(name string, port uint32, l Limit) Target {
+		tg := main
+		tg.Name, tg.ListenPort, tg.Limit = name, port, &l
+		return tg
+	}
+	limitOf := func(s *Store, name string) *Limit {
+		for _, tg := range s.Targets() {
+			if tg.Name == name {
+				return tg.Limit
+			}
+		}
+		t.Fatalf("no target %q", name)
+		return nil
+	}
+	if err := s.AddTarget(withLimit("typo", 9001, Limit{PerCNode: 10, Mode: "enforced"}), nil); !errors.Is(err, ErrInvalid) {
+		t.Errorf("new target with mode %q: %v", "enforced", err)
+	}
+	if err := s.AddTarget(withLimit("zero", 9002, Limit{PerCNode: 0, Mode: ModeEnforce}), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddTarget(withLimit("nomode", 9003, Limit{PerCNode: 10}), nil); err != nil {
+		t.Fatal(err)
+	}
+	if l := limitOf(s, "zero"); l != nil {
+		t.Errorf("new target with a limit of 0: %+v", l)
+	}
+	if l := limitOf(s, "nomode"); l == nil || l.Mode != ModeAlert {
+		t.Errorf("new target with a limit and no mode: %+v", l)
+	}
+	if err := s.SetTargetLimit("zero", &Limit{PerCNode: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if l := limitOf(s, "zero"); l == nil || l.Mode != ModeAlert {
+		t.Errorf("limit set with no mode: %+v", l)
+	}
+
+	stored := func(limit string) (*Store, error) {
+		dir := t.TempDir()
+		b := `{"version":1,"clusters":[{"name":"lab","host":"h","user":"u","password":"p"}],
+			"targets":[{"name":"main","cluster":"lab","pool":"main","port":80,"listen_port":9000,"limit":` + limit + `}]}`
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(b), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Open(dir)
+	}
+	if got, err := stored(`{"per_cnode":10}`); err != nil || limitOf(got, "main") == nil || limitOf(got, "main").Mode != ModeAlert {
+		t.Errorf("stored limit with no mode: %v", err)
+	}
+	if got, err := stored(`{"per_cnode":0,"mode":"enforce"}`); err != nil || limitOf(got, "main") != nil {
+		t.Errorf("stored limit of 0: %v", err)
+	}
+	if _, err := stored(`{"per_cnode":10,"mode":"enforced"}`); err == nil || !strings.Contains(err.Error(), `target "main"`) {
+		t.Errorf("stored limit with mode %q: %v", "enforced", err)
+	}
+}

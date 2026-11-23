@@ -108,16 +108,22 @@ func (s *Server) handleLimitSet(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &in) {
 		return
 	}
-	if in.Mode == "" {
-		in.Mode = state.ModeAlert
-	}
 	if err := s.store.SetTargetLimit(name, &state.Limit{PerCNode: in.PerCNode, Mode: in.Mode}); err != nil {
 		storeError(w, err)
 		return
 	}
 	s.poller.limitChanged(name)
 	_, _, _ = s.poller.apply(s.ctx)
-	s.log.Info("limit set", "target", name, "per_cnode", in.PerCNode, "mode", in.Mode)
+	// What was stored: the store reads no mode as alert, and 0 as none.
+	for _, t := range s.store.Targets() {
+		switch {
+		case t.Name != name:
+		case t.Limit == nil:
+			s.log.Info("limit removed", "target", name)
+		default:
+			s.log.Info("limit set", "target", name, "per_cnode", t.Limit.PerCNode, "mode", t.Limit.Mode)
+		}
+	}
 	s.respondTarget(w, name)
 }
 
