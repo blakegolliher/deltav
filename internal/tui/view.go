@@ -73,6 +73,17 @@ func (m *Model) header() []string {
 		// what falls off the edge.
 		return []string{left, right, ""}
 	}
+	// With room for it the mark stands to the left of the title, which is on
+	// its middle row. Its last row takes the place of the blank line, and a
+	// tall terminal gets the blank line as well.
+	rows := markLines()
+	if indent := lipgloss.Width(rows[1]) + 1; m.height >= markMinHeight && gap-indent >= 2 {
+		header := []string{rows[0], rows[1] + " " + left + strings.Repeat(" ", gap-indent) + right, rows[2]}
+		if m.height >= markRoomyHeight {
+			header = append(header, "")
+		}
+		return header
+	}
 	return []string{left + strings.Repeat(" ", gap) + right, ""}
 }
 

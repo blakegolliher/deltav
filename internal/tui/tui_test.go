@@ -385,6 +385,54 @@ func TestControlsCaveats(t *testing.T) {
 	}
 }
 
+// The mark stands beside the title wherever it fits: at 80 by 24 it costs
+// the blank line and one more, a tall terminal keeps a blank line under it,
+// and a short or narrow one goes without.
+func TestHeaderMark(t *testing.T) {
+	plain := func(m *Model) []string {
+		var out []string
+		for _, l := range m.header() {
+			out = append(out, ansi.Strip(l))
+		}
+		return out
+	}
+	at := func(w, h int) *Model {
+		m := sample()
+		m.width, m.height = w, h
+		return m
+	}
+
+	h := plain(at(80, 24))
+	if len(h) != 3 || h[0] != "     ⡜⢣⢀⣉⠕" || !strings.HasPrefix(h[1], " ⣀⠤⠔⡜⠒⠉⢣ Delta-V  ") || h[2] != "⠪⠤ ⣜⣀⣀⣀⣀⣣" {
+		t.Errorf("header at 80 by 24: %q", h)
+	}
+	if !strings.HasSuffix(h[1], "● live") || ansi.StringWidth(h[1]) != 80 {
+		t.Errorf("the title line must end at the right edge with the state of the connection: %q", h[1])
+	}
+	fits(t, at(80, 24), "overview with the mark")
+
+	if h := plain(at(120, 40)); len(h) != 4 || h[3] != "" || !strings.HasPrefix(h[1], " ⣀⠤⠔⡜⠒⠉⢣ Delta-V  ") {
+		t.Errorf("header at 120 by 40: %q", h)
+	}
+	for _, m := range []*Model{at(100, 23), at(72, 40)} {
+		if h := plain(m); !strings.HasPrefix(h[0], "Delta-V  ") {
+			t.Errorf("a %d by %d terminal has no room for the mark: %q", m.width, m.height, h)
+		}
+	}
+
+	// The orbit is in color and the triangle is not; no row is wider than
+	// the ten cells the mark was drawn in.
+	rows := markLines()
+	if !strings.Contains(rows[0], styleOrbit.Render("⢀⣉⠕")) || !strings.HasPrefix(rows[0], "     ⡜⢣") {
+		t.Errorf("first row of the mark: %q", rows[0])
+	}
+	for i, r := range rows {
+		if w := ansi.StringWidth(r); w > 10 {
+			t.Errorf("row %d of the mark is %d cells wide", i, w)
+		}
+	}
+}
+
 func TestOverviewView(t *testing.T) {
 	m := sample()
 	s := screen(m)

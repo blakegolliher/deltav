@@ -21,7 +21,50 @@ var (
 	styleWarn      = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styleBad       = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	styleSelected  = lipgloss.NewStyle().Reverse(true)
+	styleOrbit     = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 )
+
+// markRun is a stretch of the mark in one color.
+type markRun struct {
+	text  string
+	orbit bool
+}
+
+// mark is the Delta-V mark for the header, in three rows of braille dots: a
+// triangle in the terminal's own foreground, and through it an orbit in
+// blue that curls under at its low end and over at its high one. It was
+// drawn by hand on a grid of 20 by 12 dots (a cell is 2 by 4), so that no
+// cell holds dots of both: a cell has one color.
+var mark = [3][]markRun{
+	{{"     ⡜⢣", false}, {"⢀⣉⠕", true}},
+	{{" ", false}, {"⣀⠤⠔", true}, {"⡜", false}, {"⠒⠉", true}, {"⢣", false}},
+	{{"⠪⠤", true}, {" ⣜⣀⣀⣀⣀⣣", false}},
+}
+
+// markMinHeight is the shortest terminal the mark is drawn in: it makes the
+// header a line taller, and below this the line is worth more. From
+// markRoomyHeight up there is a blank line under it too.
+const (
+	markMinHeight   = 24
+	markRoomyHeight = 30
+)
+
+// markLines renders the three rows of the mark.
+func markLines() [3]string {
+	var out [3]string
+	for i, row := range mark {
+		var b strings.Builder
+		for _, r := range row {
+			if r.orbit {
+				b.WriteString(styleOrbit.Render(r.text))
+			} else {
+				b.WriteString(r.text)
+			}
+		}
+		out[i] = b.String()
+	}
+	return out
+}
 
 // rate formats a per-second rate: "0", "0.4", "12.3", "1.2k", "3.4M".
 func rate(v float64) string {
