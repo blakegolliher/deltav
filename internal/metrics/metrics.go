@@ -390,13 +390,20 @@ func (a *Aggregator) Record(node string, samples []Sample) {
 // latest report, and adds the report's request counts to the totals. Envoy
 // leaves idle endpoints out of a report, so an endpoint missing from it has
 // nothing in flight. stream identifies the reporting stream; see LoadGone.
+// A late report from a stream older than the member's current one (stream
+// IDs only increase) still adds its counts, which are real requests, but
+// leaves the in-flight gauges to the current stream.
 func (a *Aggregator) Load(node string, stream int64, reports []LoadReport) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.dropLoad(node)
-	nl := &nodeLoad{stream: stream, at: a.now(), inflight: make(map[EndpointKey]uint64, len(reports))}
+	var nl *nodeLoad
+	if cur := a.load[node]; cur == nil || cur.stream <= stream {
+		a.dropLoad(node)
+		nl = &nodeLoad{stream: stream, at: a.now(), inflight: make(map[EndpointKey]uint64, len(reports))}
+		a.load[node] = nl
+	}
 	for _, r := range reports {
-		if r.InProgress > 0 {
+		if r.InProgress > 0 && nl != nil {
 			nl.inflight[r.Key] += r.InProgress
 			nl.total += r.InProgress
 			a.inflight[r.Key] += r.InProgress
@@ -409,7 +416,6 @@ func (a *Aggregator) Load(node string, stream int64, reports []LoadReport) {
 			a.lrs[r.Key] = t
 		}
 	}
-	a.load[node] = nl
 }
 
 // LoadGone forgets a member's in-flight requests when its reporting stream
