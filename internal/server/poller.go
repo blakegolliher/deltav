@@ -30,6 +30,8 @@ const (
 	emptyHold = 3
 	// pollTimeout bounds one poll of one cluster.
 	pollTimeout = 45 * time.Second
+	// pollParallel is how many clusters are read at once.
+	pollParallel = 4
 )
 
 // clusterView is what the last successful poll of a cluster returned, plus
@@ -271,7 +273,8 @@ func fetch(ctx context.Context, api vast.API) (*clusterView, error) {
 	return view, nil
 }
 
-// pollOnce reads every cluster and applies the result.
+// pollOnce reads every cluster and applies the result. It returns once
+// every cluster has answered or failed.
 func (p *poller) pollOnce(ctx context.Context) {
 	p.pollMu.Lock()
 	defer p.pollMu.Unlock()
@@ -280,16 +283,32 @@ func (p *poller) pollOnce(ctx context.Context) {
 	p.mu.Lock()
 	gen := maps.Clone(p.gen)
 	p.mu.Unlock()
+	// Clusters are read side by side, and each answer is applied as it
+	// comes: one cluster slow to answer must not hold back what another
+	// said. apply is serialized and works from all views as they are.
+	sem := make(chan struct{}, pollParallel)
+	var wg sync.WaitGroup
 	for _, c := range p.s.store.Clusters() {
-		var view *clusterView
-		api, err := p.api(c, gen[c.Name])
-		if err == nil {
-			view, err = fetch(ctx, api)
-		}
-		if ctx.Err() != nil {
-			return // shutting down
-		}
-		p.commit(c.Name, gen[c.Name], view, err)
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			var view *clusterView
+			api, err := p.api(c, gen[c.Name])
+			if err == nil {
+				view, err = fetch(ctx, api)
+			}
+			if ctx.Err() != nil {
+				return // shutting down
+			}
+			if p.commit(c.Name, gen[c.Name], view, err) {
+				p.apply(ctx)
+			}
+		}()
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return
 	}
 	// Against the clusters there are now, not those this poll read: one
 	// attached meanwhile has the view its attach stored.
