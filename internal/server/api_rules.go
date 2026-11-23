@@ -96,16 +96,27 @@ func (s *Server) handleOperations(w http.ResponseWriter, _ *http.Request) {
 // under it at once, and asks for its share within milliseconds; the service
 // must know the rule by then, or it would tell the Envoy to forget the
 // count.
+//
+// The caller is told the rules were left as they were only if they were.
+// If the old ones cannot be stored again, the change stays stored (and
+// known to the quota service, since a later poll will serve it).
 func (s *Server) rulesChanged(w http.ResponseWriter, before []ratelimit.Rule) bool {
 	s.quota.SetRules(s.store.Rules())
-	if _, _, err := s.poller.apply(s.ctx); err != nil {
-		_ = s.store.ReplaceRules(before)
-		s.quota.SetRules(s.store.Rules())
-		_, _, _ = s.poller.apply(s.ctx)
-		writeError(w, http.StatusConflict, "the rules cannot be served, and were left as they were: %v", err)
+	_, _, err := s.poller.apply(s.ctx)
+	if err == nil {
+		return true
+	}
+	if rerr := s.store.ReplaceRules(before); rerr != nil {
+		writeError(w, http.StatusInternalServerError, "the rules cannot be served (%v), and the old ones could not be stored again (%v): the change is stored but not served; it may be served at the next poll, and after a restart", err, rerr)
 		return false
 	}
-	return true
+	s.quota.SetRules(s.store.Rules())
+	if _, _, rerr := s.poller.apply(s.ctx); rerr != nil {
+		writeError(w, http.StatusInternalServerError, "the rules cannot be served (%v); the old ones are stored again, but serving them failed too (%v): Envoys will be sent them at the next successful poll", err, rerr)
+		return false
+	}
+	writeError(w, http.StatusConflict, "the rules cannot be served, and were left as they were: %v", err)
+	return false
 }
 
 func (s *Server) handleRuleSet(w http.ResponseWriter, r *http.Request) {

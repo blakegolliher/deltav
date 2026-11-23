@@ -236,7 +236,10 @@ func (s *Server) handleTargetAdd(w http.ResponseWriter, r *http.Request) {
 	// The daemon's context, not the request's: a client that hangs up must
 	// not leave the fleet with half a push.
 	if _, _, err := s.poller.apply(s.ctx); err != nil {
-		_ = s.store.RemoveTarget(in.Name)
+		if rerr := s.store.RemoveTarget(in.Name); rerr != nil {
+			writeError(w, http.StatusInternalServerError, "target %q cannot be served (%v), and it could not be removed again (%v): it is stored but not served, and will be tried again at the next poll and after a restart; remove it", in.Name, err, rerr)
+			return
+		}
 		writeError(w, http.StatusConflict, "target %q cannot be served: %v", in.Name, err)
 		return
 	}
