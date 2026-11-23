@@ -539,7 +539,7 @@ func TestFleetView(t *testing.T) {
 	if m.query.Offset != size {
 		t.Errorf("offset after one page = %d, want %d", m.query.Offset, size)
 	}
-	m.query.Offset = 100 - size
+	m.query.Offset, m.fleet.Offset = 100-size, 100-size
 	press(m, "pgdown")
 	if m.query.Offset != 100-size {
 		t.Errorf("paged past the end: offset %d", m.query.Offset)
@@ -670,7 +670,7 @@ func TestNavigationAndStatus(t *testing.T) {
 	m.Update(eventMsg{Err: fmt.Errorf("cannot reach the daemon at http://127.0.0.1:18080: connection refused")})
 	s = screen(m)
 	expect(t, s, "○ disconnected", "! cannot reach the daemon", "main")
-	m.Update(overviewMsg{v: m.overview})
+	m.Update(overviewMsg{request: m.ask(tabOverview), v: m.overview})
 	if strings.Contains(screen(m), "! cannot reach") {
 		t.Error("the error stayed after a successful read")
 	}
@@ -806,8 +806,8 @@ func TestAgainstADaemon(t *testing.T) {
 	} {
 		_, cmd := m.Update(tea.KeyPressMsg{Code: rune(step.key[0]), Text: step.key})
 		run(t, m, cmd)
-		if m.errText != "" {
-			t.Errorf("view %s: %s", step.key, m.errText)
+		if p := m.problem(); p != "" {
+			t.Errorf("view %s: %s", step.key, p)
 		}
 		expect(t, screen(m), step.wants...)
 	}

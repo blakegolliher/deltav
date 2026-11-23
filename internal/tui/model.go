@@ -64,7 +64,19 @@ type Model struct {
 
 	live      bool      // the event stream is connected
 	lastEvent time.Time // when the last event arrived
-	errText   string    // the latest failure, shown until something succeeds
+	streamErr string    // why the event stream broke, until an overview arrives
+	// readErr is, per view, why its last read failed. Only a read of the
+	// same view clears it: another view's success says nothing about it.
+	readErr [4]string
+	// errText is a failed change, or a key that could not be used. It stays
+	// until the next key or change, so the refresh a failure starts does
+	// not erase it.
+	errText string
+
+	// seq numbers each read; shown is, per view, the number of the read it
+	// shows. Answers can arrive out of order.
+	seq   uint64
+	shown [4]uint64
 
 	overview *Overview
 	cnodes   *CNodes
@@ -116,22 +128,39 @@ func Run(ctx context.Context, api *Client) error {
 	return err
 }
 
+// reqKey is what a view's read asks for: the window, and for the fleet the
+// page, sort and filters.
+type reqKey struct {
+	window string
+	query  FleetQuery
+}
+
+// request is a read as it was sent: what it asked for, and its number.
+type request struct {
+	key reqKey
+	seq uint64
+}
+
 // Messages carrying what a command fetched.
 type (
 	eventMsg    Event
 	overviewMsg struct {
+		request
 		v   *Overview
 		err error
 	}
 	cnodesMsg struct {
+		request
 		v   *CNodes
 		err error
 	}
 	fleetMsg struct {
+		request
 		v   *Fleet
 		err error
 	}
 	controlsMsg struct {
+		request
 		targets  []TargetInfo
 		clusters []Cluster
 		cnodes   []CNode
@@ -174,46 +203,97 @@ func (m *Model) fetch(withOverview bool) tea.Cmd {
 	api, ctx, win := m.api, m.ctx, windows[m.window]
 	var cmds []tea.Cmd
 	if m.tab == tabOverview && (withOverview || m.window != 0) {
+		r := m.ask(tabOverview)
 		cmds = append(cmds, func() tea.Msg {
 			v, err := api.Overview(ctx, win)
-			return overviewMsg{v, err}
+			return overviewMsg{r, v, err}
 		})
 	}
 	switch m.tab {
 	case tabCNodes:
+		r := m.ask(tabCNodes)
 		cmds = append(cmds, func() tea.Msg {
 			v, err := api.CNodes(ctx, win)
-			return cnodesMsg{v, err}
+			return cnodesMsg{r, v, err}
 		})
 	case tabFleet:
-		q := m.query
-		q.Limit = m.pageSize()
+		r := m.ask(tabFleet)
 		cmds = append(cmds, func() tea.Msg {
-			v, err := api.Fleet(ctx, win, q)
-			return fleetMsg{v, err}
+			v, err := api.Fleet(ctx, win, r.key.query)
+			return fleetMsg{r, v, err}
 		})
 	case tabControls:
+		r := m.ask(tabControls)
 		cmds = append(cmds, func() tea.Msg {
 			targets, err := api.Targets(ctx)
 			if err != nil {
-				return controlsMsg{err: err}
+				return controlsMsg{request: r, err: err}
 			}
 			clusters, err := api.Clusters(ctx)
 			if err != nil {
-				return controlsMsg{err: err}
+				return controlsMsg{request: r, err: err}
 			}
 			cnodes, err := api.CNodes(ctx, win)
 			if err != nil {
-				return controlsMsg{err: err}
+				return controlsMsg{request: r, err: err}
 			}
 			rules, err := api.Rules(ctx)
 			if err != nil {
-				return controlsMsg{err: err}
+				return controlsMsg{request: r, err: err}
 			}
-			return controlsMsg{targets, clusters, cnodes.CNodes, rules, nil}
+			return controlsMsg{r, targets, clusters, cnodes.CNodes, rules, nil}
 		})
 	}
 	return tea.Batch(cmds...)
+}
+
+// want is what a read of view t asks for now.
+func (m *Model) want(t tab) reqKey {
+	k := reqKey{window: windows[m.window]}
+	if t == tabFleet {
+		k.query = m.query
+		k.query.Limit = m.pageSize()
+	}
+	return k
+}
+
+// ask numbers a read of view t.
+func (m *Model) ask(t tab) request {
+	m.seq++
+	return request{m.want(t), m.seq}
+}
+
+// current reports whether an answer is for what view t asks for now, and no
+// older than what it shows; if so, the view takes it. An answer for an
+// earlier page, filter or window, or overtaken by a later read, is dropped.
+func (m *Model) current(t tab, r request) bool {
+	if r.key != m.want(t) || r.seq < m.shown[t] {
+		return false
+	}
+	m.shown[t] = r.seq
+	return true
+}
+
+// read records how view t's read ended, and reports whether it succeeded.
+func (m *Model) read(t tab, err error) bool {
+	if err != nil {
+		m.readErr[t] = err.Error()
+		return false
+	}
+	m.readErr[t] = ""
+	return true
+}
+
+// problem is the failure the status line shows: a failed change or key
+// first, then the current view's read, then the event stream.
+func (m *Model) problem() string {
+	switch {
+	case m.errText != "":
+		return m.errText
+	case m.readErr[m.tab] != "":
+		return m.readErr[m.tab]
+	}
+	return m.streamErr
 }
 
 // rows is how many selectable rows the current view has.
@@ -254,14 +334,6 @@ func (m *Model) clampCursor() {
 	m.cursor[m.tab] = max(0, min(m.cursor[m.tab], m.rows()-1))
 }
 
-func (m *Model) fail(err error) {
-	if err != nil {
-		m.errText = err.Error()
-	} else {
-		m.errText = ""
-	}
-}
-
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -271,10 +343,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case eventMsg:
 		if msg.Err != nil {
 			m.live = false
-			m.errText = msg.Err.Error()
+			m.streamErr = msg.Err.Error()
 			return m, m.waitEvent()
 		}
-		m.live, m.lastEvent = true, m.now()
+		m.live, m.lastEvent, m.streamErr = true, m.now(), ""
 		if m.window == 0 || m.overview == nil {
 			m.overview = msg.Overview
 		} else {
@@ -284,15 +356,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.waitEvent(), m.fetch(false))
 
 	case overviewMsg:
-		if m.fail(msg.err); msg.err == nil {
-			m.overview = msg.v
+		if !m.current(tabOverview, msg.request) {
+			break
+		}
+		if m.read(tabOverview, msg.err) {
+			// The daemon answered with what the stream carries.
+			m.overview, m.streamErr = msg.v, ""
 		}
 	case cnodesMsg:
-		if m.fail(msg.err); msg.err == nil {
+		if m.current(tabCNodes, msg.request) && m.read(tabCNodes, msg.err) {
 			m.cnodes = msg.v
 		}
 	case fleetMsg:
-		if m.fail(msg.err); msg.err == nil {
+		if m.current(tabFleet, msg.request) && m.read(tabFleet, msg.err) {
 			m.fleet = msg.v
 			// A page past the end (the fleet shrank): go back to the last.
 			if len(msg.v.Members) == 0 && msg.v.Matched > 0 && m.query.Offset > 0 {
@@ -301,14 +377,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case controlsMsg:
-		if m.fail(msg.err); msg.err == nil {
+		if m.current(tabControls, msg.request) && m.read(tabControls, msg.err) {
 			m.targets, m.clusters, m.control, m.rules, m.loaded = msg.targets, msg.clusters, msg.cnodes, msg.rules, true
 		}
 	case actionMsg:
-		m.fail(msg.err)
-		m.notice = ""
-		if msg.err == nil {
-			m.notice = msg.done
+		m.errText, m.notice = "", msg.done
+		if msg.err != nil {
+			m.errText, m.notice = msg.err.Error(), ""
 		}
 		return m, m.fetch(true)
 
@@ -321,6 +396,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
+	m.errText = "" // a key moves on from the last failed change
 	if m.about {
 		// Any key puts the notes away; quitting still quits.
 		m.about = false
@@ -413,13 +489,19 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case tabFleet:
 		refetch := true
 		switch k {
+		// Pages move from the page on the screen, which a read in flight
+		// may not have replaced yet.
 		case "pgdown", "n":
-			if m.fleet != nil && m.query.Offset+m.pageSize() < m.fleet.Matched {
-				m.query.Offset += m.pageSize()
+			if m.fleet != nil && m.fleet.Offset+m.pageSize() < m.fleet.Matched {
+				m.query.Offset = m.fleet.Offset + m.pageSize()
 				m.cursor[tabFleet] = 0
 			}
 		case "pgup", "p":
-			m.query.Offset = max(0, m.query.Offset-m.pageSize())
+			from := m.query.Offset
+			if m.fleet != nil {
+				from = m.fleet.Offset
+			}
+			m.query.Offset = max(0, from-m.pageSize())
 			m.cursor[tabFleet] = 0
 		case "s":
 			m.sortIndex = (m.sortIndex + 1) % len(fleetSorts)

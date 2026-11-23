@@ -133,8 +133,8 @@ func (m *Model) footer() []string {
 	}
 	status := ""
 	switch {
-	case m.errText != "":
-		status = styleBad.Render("! " + m.errText)
+	case m.problem() != "":
+		status = styleBad.Render("! " + m.problem())
 	case m.notice != "" && m.tab == tabControls:
 		status = styleGood.Render("✓ " + m.notice)
 	}
