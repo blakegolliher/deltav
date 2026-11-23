@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -131,6 +132,12 @@ type poller struct {
 	pollMu  sync.Mutex // one poll at a time
 	applyMu sync.Mutex // one apply at a time: compute and publish together
 
+	// The cache last saved, and whether the latest save failed. Under
+	// applyMu. A save follows this and not the config: a config already
+	// published is not published again, but a failed save must be retried.
+	saved       state.Cache
+	saveFailing bool
+
 	mu       sync.Mutex
 	apis     map[string]apiEntry
 	views    map[string]*clusterView
@@ -175,11 +182,20 @@ func newPoller(s *Server, interval time.Duration) *poller {
 	// enforced share. Without the share the first snapshot would be worked
 	// out for a fleet of none, and loosen every limit until the fleet had
 	// reconnected and the debounce interval had passed.
-	cache := s.store.LoadCache()
+	cache, err := s.store.LoadCache()
+	if err != nil {
+		s.log.Warn("cannot read the cache of what was served before the restart; targets wait for their first poll", "error", err)
+	} else {
+		p.saved = cache // what is on disk; an unreadable one is replaced at the first apply
+	}
 	for name, eps := range cache.Endpoints {
+		// [] is a target served with no endpoints: it is served again, so
+		// that its listener stays. A target not in the cache is not served.
+		served := make([]xds.Endpoint, 0, len(eps))
 		for _, e := range eps {
-			p.served[name] = append(p.served[name], xds.Endpoint{IP: e.IP, Port: e.Port, CNode: e.CNode})
+			served = append(served, xds.Endpoint{IP: e.IP, Port: e.Port, CNode: e.CNode})
 		}
+		p.served[name] = served
 	}
 	for name, h := range cache.Hosts {
 		p.hosts[name] = h
@@ -505,9 +521,12 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 		}
 	}
 	for name, eps := range p.served {
+		// Every target served, even with no endpoints (see newPoller).
+		cached := make([]state.Endpoint, 0, len(eps))
 		for _, e := range eps {
-			cache.Endpoints[name] = append(cache.Endpoints[name], state.Endpoint{IP: e.IP, Port: e.Port, CNode: e.CNode})
+			cached = append(cached, state.Endpoint{IP: e.IP, Port: e.Port, CNode: e.CNode})
 		}
+		cache.Endpoints[name] = cached
 	}
 	for name, d := range p.debounce {
 		if d.Current() > 0 {
@@ -528,8 +547,22 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 	}
 	if changed {
 		p.s.log.Info("targets updated", "targets", len(specs), "config_version", version)
+	}
+	// Saved when it differs from what was last saved, not only when the
+	// config changed: a failed save is retried at every apply until one
+	// works, and hosts with no rule to render them change no config.
+	if changed || !reflect.DeepEqual(cache, p.saved) {
 		if err := p.s.store.SaveCache(cache); err != nil {
-			p.s.log.Warn("cannot save the cache of what is served", "error", err)
+			// Once per config, not at every retry.
+			if !p.saveFailing || changed {
+				p.s.log.Warn("cannot save the cache of what is served; a restart while VAST cannot be read would not serve it", "error", err)
+			}
+			p.saveFailing = true
+		} else {
+			if p.saveFailing {
+				p.s.log.Info("the cache of what is served is saved again")
+			}
+			p.saved, p.saveFailing = cache, false
 		}
 	}
 	return version, changed, nil

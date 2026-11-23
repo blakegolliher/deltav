@@ -118,8 +118,8 @@ func TestStateRules(t *testing.T) {
 func TestCache(t *testing.T) {
 	dir := t.TempDir()
 	s := open(t, dir)
-	if got := s.LoadCache(); len(got.Endpoints) != 0 || len(got.Shares) != 0 {
-		t.Fatalf("empty cache: %+v", got)
+	if got, err := s.LoadCache(); err != nil || len(got.Endpoints) != 0 || len(got.Shares) != 0 {
+		t.Fatalf("empty cache: %+v, %v", got, err)
 	}
 	want := Cache{
 		Endpoints: map[string][]Endpoint{"main": {{IP: "192.0.2.1", Port: 80, CNode: "cnode-1"}, {IP: "192.0.2.2", Port: 80}}},
@@ -128,16 +128,19 @@ func TestCache(t *testing.T) {
 	if err := s.SaveCache(want); err != nil {
 		t.Fatal(err)
 	}
-	got := open(t, dir).LoadCache()
+	got, err := open(t, dir).LoadCache()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got.Endpoints["main"]) != 2 || got.Endpoints["main"][0] != want.Endpoints["main"][0] || got.Endpoints["main"][1] != want.Endpoints["main"][1] || got.Shares["main"] != 5 {
 		t.Errorf("cache after reopen: %+v", got)
 	}
-	// A damaged cache is only a cache: ignore it.
+	// A damaged cache is only a cache: start without it, and say so.
 	if err := os.WriteFile(filepath.Join(dir, "served.json"), []byte("{broken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.LoadCache(); len(got.Endpoints) != 0 || got.Endpoints == nil || got.Shares == nil {
-		t.Errorf("damaged cache: %+v", got)
+	if got, err := s.LoadCache(); err == nil || len(got.Endpoints) != 0 || got.Endpoints == nil || got.Shares == nil {
+		t.Errorf("damaged cache: %+v, %v", got, err)
 	}
 }
 

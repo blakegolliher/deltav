@@ -506,12 +506,22 @@ type Cache struct {
 	Hosts     map[string]ratelimit.Hosts `json:"hosts,omitempty"`
 }
 
-// LoadCache returns the cache; an absent or unreadable one is empty.
-func (s *Store) LoadCache() Cache {
+// LoadCache returns the cache. An absent one is empty, and so is one that
+// cannot be read or parsed; the error then says why, for the log: it is
+// only a cache, but a restart without it is not the restart 24 promises.
+func (s *Store) LoadCache() (Cache, error) {
 	c := Cache{}
+	var err error
 	if s.dir != "" {
-		if b, err := os.ReadFile(filepath.Join(s.dir, cacheFile)); err == nil && json.Unmarshal(b, &c) != nil {
-			c = Cache{}
+		path := filepath.Join(s.dir, cacheFile)
+		var b []byte
+		switch b, err = os.ReadFile(path); {
+		case errors.Is(err, fs.ErrNotExist):
+			err = nil
+		case err == nil:
+			if err = json.Unmarshal(b, &c); err != nil {
+				c, err = Cache{}, fmt.Errorf("%s: %w", path, err)
+			}
 		}
 	}
 	if c.Endpoints == nil {
@@ -520,7 +530,10 @@ func (s *Store) LoadCache() Cache {
 	if c.Shares == nil {
 		c.Shares = map[string]uint32{}
 	}
-	return c
+	if c.Hosts == nil {
+		c.Hosts = map[string]ratelimit.Hosts{}
+	}
+	return c, err
 }
 
 // SaveCache replaces the cache.
