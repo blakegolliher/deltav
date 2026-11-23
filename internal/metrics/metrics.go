@@ -342,6 +342,7 @@ type Aggregator struct {
 	load      map[string]*nodeLoad       // by node ID: its latest load report
 	inflight  map[EndpointKey]uint64     // fleet total of the latest reports
 	lrs       map[EndpointKey]LoadTotals // cumulative
+	lrsAt     map[EndpointKey]time.Time  // when each of lrs last grew
 }
 
 // New returns an empty aggregator.
@@ -350,6 +351,7 @@ func New() *Aggregator {
 		now: time.Now, started: time.Now(),
 		endpoints: map[EndpointKey]*series{}, members: map[string]*series{},
 		load: map[string]*nodeLoad{}, inflight: map[EndpointKey]uint64{}, lrs: map[EndpointKey]LoadTotals{},
+		lrsAt: map[EndpointKey]time.Time{},
 	}
 }
 
@@ -396,10 +398,11 @@ func (a *Aggregator) Record(node string, samples []Sample) {
 func (a *Aggregator) Load(node string, stream int64, reports []LoadReport) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	now := a.now()
 	var nl *nodeLoad
 	if cur := a.load[node]; cur == nil || cur.stream <= stream {
 		a.dropLoad(node)
-		nl = &nodeLoad{stream: stream, at: a.now(), inflight: make(map[EndpointKey]uint64, len(reports))}
+		nl = &nodeLoad{stream: stream, at: now, inflight: make(map[EndpointKey]uint64, len(reports))}
 		a.load[node] = nl
 	}
 	for _, r := range reports {
@@ -414,6 +417,7 @@ func (a *Aggregator) Load(node string, stream int64, reports []LoadReport) {
 			t.Success += r.Success
 			t.Errors += r.Errors
 			a.lrs[r.Key] = t
+			a.lrsAt[r.Key] = now
 		}
 	}
 }
@@ -687,7 +691,8 @@ func (a *Aggregator) MemberTotals() map[string]Totals {
 // Prune drops series that have had no request for idle, and load reports
 // older than staleLoad (a reporting stream that died without closing).
 // Cumulative totals go with their series, which Prometheus sees as a
-// counter reset.
+// counter reset. Load-report totals are a series of their own: an endpoint
+// can be counted by either source while the other is silent.
 func (a *Aggregator) Prune(idle, staleLoad time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -695,7 +700,12 @@ func (a *Aggregator) Prune(idle, staleLoad time.Duration) {
 	for k, s := range a.endpoints {
 		if now.Sub(s.last) > idle {
 			delete(a.endpoints, k)
+		}
+	}
+	for k, at := range a.lrsAt {
+		if now.Sub(at) > idle {
 			delete(a.lrs, k)
+			delete(a.lrsAt, k)
 		}
 	}
 	for node, s := range a.members {
