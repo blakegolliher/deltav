@@ -457,7 +457,10 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     the whole seconds Envoy reports. A rule's status is worked out once a second for
     everyone who asks. A changed rule reaches the quota service before Envoy, so that the
     first report of its count finds the rule known; and one lock is held across a rule change
-    and its undoing.
+    and its undoing. Not all the square went (review of 2026-11-23, finding T1): each report
+    still looked over every Envoy's part of the count for any that had gone, 0.3 s a round
+    with 2,000 Envoys on one count; that is now done only before the shares are worked out,
+    11 ms a round, and a stream's close and the half-minute sweep drop the rest.
 61. **The bucket is what a server would take it to be** (how, and the last sentence, are
     replaced by 66). The script compared the bucket as
     the bytes on the wire, while it decoded the key: `/arch%69ve/k` was not bucket `archive`,

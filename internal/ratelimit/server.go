@@ -153,6 +153,7 @@ type Server struct {
 	overflow uint64
 	swept    time.Time
 	divided  uint64 // times a count's shares were worked out
+	pruned   uint64 // parts looked at to drop those gone
 	recent   []Refusal
 	oldest   int // index in recent of the oldest, once it is full
 
@@ -400,6 +401,7 @@ func (s *Server) closed(me *stream) {
 // prune drops the parts of a count whose Envoy has gone or stopped
 // reporting, and reports whether any are left.
 func (s *Server) prune(b *bucket, now time.Time) bool {
+	s.pruned += uint64(len(b.parts))
 	for id, p := range b.parts {
 		if _, alive := s.streams[id]; !alive || now.Sub(p.last) > staleAfter {
 			delete(b.parts, id)
@@ -465,13 +467,21 @@ func (s *Server) assign(k bucketKey, reporter int64, out map[int64][]*rlqs.RateL
 	if b == nil {
 		return
 	}
-	now := s.now()
-	if !s.prune(b, now) {
+	if len(b.parts) == 0 {
 		s.drop(k)
 		return
 	}
+	now := s.now()
 	since := now.Sub(b.computed)
 	if since >= recomputeEvery || (b.dirty && (len(b.parts) <= fewEnvoys || since >= joinEvery)) {
+		// Parts that are gone are dropped only here, before a division,
+		// not on every report: that looked at every part of the count for
+		// each report, the square of the fleet in each round. Between
+		// divisions, stream closure and the sweep drop them.
+		if !s.prune(b, now) {
+			s.drop(k)
+			return
+		}
 		s.divide(k, b, now)
 		for id, p := range b.parts {
 			if id != reporter && p.differs(resendChange) {
