@@ -11,10 +11,12 @@ import (
 
 // Sanitizer scrubs identifying values out of VAST API responses so they
 // can be committed as test fixtures. Field names, structure, numbers and
-// booleans are left exactly as returned; only string values (and object
-// keys that hold addresses) change, and the same real value always maps to
-// the same replacement across every document, so relations between
-// documents (a VIP's pool, a VIP's CNode) survive.
+// booleans are left exactly as returned, except under a field whose name
+// says it holds a secret: its whole value, whatever its type, becomes
+// "REDACTED". Otherwise only string values (and object keys that hold
+// addresses) change, and the same real value always maps to the same
+// replacement across every document, so relations between documents (a
+// VIP's pool, a VIP's CNode) survive.
 //
 // What it replaces:
 //   - IPv4 addresses: mapped, in address order, onto the documentation
@@ -173,7 +175,7 @@ var fieldRules = []struct {
 	doc  string // "" for every document, or the one document it applies to
 	re   *regexp.Regexp
 }{
-	{"redact", "", regexp.MustCompile(`passw|secret|token|private|credential|access_key|certificate|(^|_)cert$|licen[cs]e`)},
+	{"redact", "", secretField},
 	{"text", "", regexp.MustCompile(`description|comment|(^|_)notes?$`)},
 	{"serial", "", regexp.MustCompile(`serial|(^|_)sn$|wwn|asset`)},
 	{"guid", "", regexp.MustCompile(`guid|uuid`)},
@@ -191,6 +193,9 @@ var fieldRules = []struct {
 	{"pool", "vippools", regexp.MustCompile(`^name$`)},
 	{"pool", "vips", regexp.MustCompile(`^vippool(_name)?$`)},
 }
+
+// secretField marks fields whose whole value is redacted.
+var secretField = regexp.MustCompile(`passw|secret|token|private|credential|access_key|certificate|(^|_)cert$|licen[cs]e`)
 
 // versionField marks fields whose dotted numbers are versions, not IPs.
 var versionField = regexp.MustCompile(`version|build|release|firmware|bios`)
@@ -285,6 +290,15 @@ func (s *Sanitizer) walk(doc, path, field string, v any, stats map[string]*field
 			st.rules[rule]++
 		}
 	}
+	// A secret-named field is replaced whole: an object, array or number
+	// under it is as secret as a string, and the names inside it need not
+	// say so. An empty string or a null holds nothing and stays.
+	if secretField.MatchString(strings.ToLower(field)) {
+		if kind := jsonKind(v); kind != "null" && v != "" {
+			note(kind, fmt.Sprint(v), "redact")
+			return "REDACTED"
+		}
+	}
 	switch x := v.(type) {
 	case map[string]any:
 		note("object", "", "")
@@ -318,6 +332,23 @@ func (s *Sanitizer) walk(doc, path, field string, v any, stats map[string]*field
 		note("null", "", "")
 	}
 	return v
+}
+
+// jsonKind names the JSON type of a decoded value, as the report does.
+func jsonKind(v any) string {
+	switch v.(type) {
+	case map[string]any:
+		return "object"
+	case []any:
+		return "array"
+	case string:
+		return "string"
+	case json.Number, float64:
+		return "number"
+	case bool:
+		return "bool"
+	}
+	return "null"
 }
 
 // scrub cleans one string value and names the rule that changed it.
