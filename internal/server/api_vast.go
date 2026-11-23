@@ -126,6 +126,7 @@ func (s *Server) handleClusterAdd(w http.ResponseWriter, r *http.Request) {
 	s.poller.mu.Lock()
 	s.poller.views[c.Name] = view
 	s.poller.apis[c.Name] = apiEntry{cfg: c, api: api}
+	s.poller.gen[c.Name]++
 	s.poller.mu.Unlock()
 	s.log.Info("VAST cluster attached", "cluster", c.Name, "host", c.Host, "cnodes", len(view.CNodes), "pools", len(view.Pools), "vips", len(view.VIPs))
 	writeJSON(w, http.StatusCreated, s.clusterJSON(c))
@@ -140,6 +141,7 @@ func (s *Server) handleClusterRemove(w http.ResponseWriter, r *http.Request) {
 	s.poller.mu.Lock()
 	delete(s.poller.views, name)
 	delete(s.poller.apis, name)
+	s.poller.gen[name]++
 	s.poller.mu.Unlock()
 	s.log.Info("VAST cluster detached", "cluster", name)
 	w.WriteHeader(http.StatusNoContent)

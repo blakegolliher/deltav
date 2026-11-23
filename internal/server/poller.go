@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"reflect"
 	"sort"
@@ -144,6 +145,7 @@ type poller struct {
 	mu       sync.Mutex
 	apis     map[string]apiEntry
 	views    map[string]*clusterView
+	gen      map[string]uint64          // per cluster: moved on by attach and detach; see commit
 	served   map[string][]xds.Endpoint  // per VAST target: endpoints now served
 	hosts    map[string]ratelimit.Hosts // per VAST target: where a bucket is in a host name
 	empty    map[string]int             // per VAST target: polls in a row without endpoints
@@ -163,7 +165,7 @@ func newPoller(s *Server, interval time.Duration) *poller {
 	}
 	p := &poller{
 		s: s, interval: interval,
-		apis: map[string]apiEntry{}, views: map[string]*clusterView{},
+		apis: map[string]apiEntry{}, views: map[string]*clusterView{}, gen: map[string]uint64{},
 		served: map[string][]xds.Endpoint{}, hosts: map[string]ratelimit.Hosts{}, empty: map[string]int{}, emptyAt: map[string]time.Time{}, status: map[string]targetStatus{},
 		debounce: map[string]*limit.Debouncer{}, now: time.Now,
 		minChange: s.cfg.LimitMinChange, minInterval: s.cfg.LimitMinInterval,
@@ -225,7 +227,8 @@ func (p *poller) run(ctx context.Context) {
 }
 
 // api returns the client for a cluster, rebuilt if its settings changed.
-func (p *poller) api(c state.Cluster) (vast.API, error) {
+// It is kept only if the cluster is still the one of generation gen.
+func (p *poller) api(c state.Cluster, gen uint64) (vast.API, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.apis[c.Name]; ok && e.cfg == c {
@@ -235,7 +238,9 @@ func (p *poller) api(c state.Cluster) (vast.API, error) {
 	if err != nil {
 		return nil, err
 	}
-	p.apis[c.Name] = apiEntry{cfg: c, api: api}
+	if p.gen[c.Name] == gen {
+		p.apis[c.Name] = apiEntry{cfg: c, api: api}
+	}
 	return api, nil
 }
 
@@ -270,57 +275,82 @@ func fetch(ctx context.Context, api vast.API) (*clusterView, error) {
 func (p *poller) pollOnce(ctx context.Context) {
 	p.pollMu.Lock()
 	defer p.pollMu.Unlock()
-	clusters := p.s.store.Clusters()
-	known := map[string]bool{}
-	for _, c := range clusters {
-		known[c.Name] = true
+	// The generations before the clusters: a cluster attached or detached
+	// from here on has a new one, and what this poll read for it is dropped.
+	p.mu.Lock()
+	gen := maps.Clone(p.gen)
+	p.mu.Unlock()
+	for _, c := range p.s.store.Clusters() {
 		var view *clusterView
-		api, err := p.api(c)
+		api, err := p.api(c, gen[c.Name])
 		if err == nil {
 			view, err = fetch(ctx, api)
 		}
 		if ctx.Err() != nil {
 			return // shutting down
 		}
-		now := time.Now()
-		p.mu.Lock()
-		old := p.views[c.Name]
-		switch {
-		case err == nil:
-			view.At = now
-			if view.DNSErr != "" {
-				if old != nil {
-					view.DNS, view.DNSRead = old.DNS, old.DNSRead
-				}
-				if old == nil || old.DNSErr == "" {
-					p.s.log.Warn("cannot read the cluster's DNS settings; rate rules will not see a bucket named in a host name unless they were read before",
-						"cluster", c.Name, "error", view.DNSErr)
-				}
-			}
-			p.views[c.Name] = view
-			if old != nil && old.Err != "" {
-				p.s.log.Info("VAST cluster reachable again", "cluster", c.Name)
-			}
-		case old != nil:
-			if old.Err == "" {
-				p.s.log.Warn("VAST poll failed; keeping the last known endpoints", "cluster", c.Name, "error", err)
-			}
-			old.Err, old.ErrAt = err.Error(), now
-		default:
-			p.s.log.Warn("VAST poll failed", "cluster", c.Name, "error", err)
-			p.views[c.Name] = &clusterView{Err: err.Error(), ErrAt: now}
-		}
-		p.mu.Unlock()
+		p.commit(c.Name, gen[c.Name], view, err)
 	}
+	// Against the clusters there are now, not those this poll read: one
+	// attached meanwhile has the view its attach stored.
 	p.mu.Lock()
+	known := map[string]bool{}
+	for _, c := range p.s.store.Clusters() {
+		known[c.Name] = true
+	}
 	for name := range p.views {
 		if !known[name] {
 			delete(p.views, name)
+		}
+	}
+	for name := range p.apis {
+		if !known[name] {
 			delete(p.apis, name)
 		}
 	}
 	p.mu.Unlock()
 	p.apply(ctx)
+}
+
+// commit stores what a poll read of a cluster, unless the cluster was
+// attached or detached since the read began (its generation moved on): a
+// late answer from a detached cluster must not land on a new one of the
+// same name, nor bring a detached one back. Generations are never deleted,
+// so a re-attach cannot reuse one. It says whether it stored the result.
+func (p *poller) commit(cluster string, gen uint64, view *clusterView, err error) bool {
+	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.gen[cluster] != gen {
+		return false
+	}
+	old := p.views[cluster]
+	switch {
+	case err == nil:
+		view.At = now
+		if view.DNSErr != "" {
+			if old != nil {
+				view.DNS, view.DNSRead = old.DNS, old.DNSRead
+			}
+			if old == nil || old.DNSErr == "" {
+				p.s.log.Warn("cannot read the cluster's DNS settings; rate rules will not see a bucket named in a host name unless they were read before",
+					"cluster", cluster, "error", view.DNSErr)
+			}
+		}
+		p.views[cluster] = view
+		if old != nil && old.Err != "" {
+			p.s.log.Info("VAST cluster reachable again", "cluster", cluster)
+		}
+	case old != nil:
+		if old.Err == "" {
+			p.s.log.Warn("VAST poll failed; keeping the last known endpoints", "cluster", cluster, "error", err)
+		}
+		old.Err, old.ErrAt = err.Error(), now
+	default:
+		p.s.log.Warn("VAST poll failed", "cluster", cluster, "error", err)
+		p.views[cluster] = &clusterView{Err: err.Error(), ErrAt: now}
+	}
+	return true
 }
 
 // resolve finds the endpoints of a target in a cluster view: the VIPs of
