@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
 	"time"
@@ -38,12 +39,18 @@ func storeError(w http.ResponseWriter, err error) {
 }
 
 // readJSON decodes a request body, rejecting fields it does not know so a
-// misspelled one is an error and not silently ignored.
+// misspelled one is an error and not silently ignored. So is anything after
+// the one value but whitespace: a body that is not what the client meant to
+// send must not be acted on in part.
 func readJSON(w http.ResponseWriter, r *http.Request, into any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(into); err != nil {
 		writeError(w, http.StatusBadRequest, "request body: %v", err)
+		return false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "request body: data after the JSON value")
 		return false
 	}
 	return true
