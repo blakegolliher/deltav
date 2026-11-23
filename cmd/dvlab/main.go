@@ -191,7 +191,9 @@ func loadgenCmd() *cobra.Command {
 			"status codes, latency and, against dvlab fakes3, which backend answered.\n\n" +
 			"With --check, every response is compared with what was sent using the fake backend's\n" +
 			"X-Fake-* headers: the Host header, the path byte for byte, the Expect header, the body.\n" +
-			"The exit status is 1 if any check fails. --check only works against dvlab fakes3.",
+			"The exit status is 1 if any check fails, or if any request gets no response to check\n" +
+			"(or none is sent). --check only works against dvlab fakes3. Without --check or\n" +
+			"--roundtrip the run only reports.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			creds, err := credentials(access, secret, region)
@@ -214,6 +216,14 @@ func loadgenCmd() *cobra.Command {
 			}
 			if res.CheckFailures > 0 {
 				return fmt.Errorf("%d checks failed", res.CheckFailures)
+			}
+			// A request that got no response was not checked, so it cannot
+			// count as passing.
+			if cfg.Check && res.Requests == 0 {
+				return errors.New("no request was sent, so nothing was checked")
+			}
+			if cfg.Check && res.TransportErrors > 0 {
+				return fmt.Errorf("%d of %d requests got no response to check", res.TransportErrors, res.Requests)
 			}
 			if cfg.Roundtrip && (res.Roundtrips != res.Requests || res.Requests == 0) {
 				return fmt.Errorf("%d of %d round trips verified", res.Roundtrips, res.Requests)
