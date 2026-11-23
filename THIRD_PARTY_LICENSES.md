@@ -40,10 +40,10 @@ under `third_party/licenses/<library>/`. No upstream file has been modified.
 | [github.com/spf13/cobra](https://github.com/spf13/cobra/blob/v1.10.2/LICENSE.txt) | v1.10.2 | Apache-2.0 | Copyright 2013-2023 The Cobra Authors (source headers) | no |
 | [github.com/spf13/pflag](https://github.com/spf13/pflag/blob/v1.0.9/LICENSE) | v1.0.9 | BSD-3-Clause | Copyright (c) 2012 Alex Ogier. All rights reserved. | no |
 | [github.com/xo/terminfo](https://github.com/xo/terminfo/blob/v1.0.0/LICENSE) | v1.0.0 | MIT | Copyright (c) 2016 Anmol Sethi | no |
-| [golang.org/x/net](https://cs.opensource.google/go/x/net/+/v0.59.0:LICENSE) | v0.59.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
-| [golang.org/x/sync/errgroup](https://cs.opensource.google/go/x/sync/+/v0.23.0:LICENSE) | v0.23.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
-| [golang.org/x/sys/unix](https://cs.opensource.google/go/x/sys/+/v0.48.0:LICENSE) | v0.48.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
-| [golang.org/x/text](https://cs.opensource.google/go/x/text/+/v0.42.0:LICENSE) | v0.42.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
+| [golang.org/x/net](https://cs.opensource.google/go/x/net/+/v0.62.0:LICENSE) | v0.62.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
+| [golang.org/x/sync/errgroup](https://cs.opensource.google/go/x/sync/+/v0.24.0:LICENSE) | v0.24.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
+| [golang.org/x/sys/unix](https://cs.opensource.google/go/x/sys/+/v0.49.0:LICENSE) | v0.49.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
+| [golang.org/x/text](https://cs.opensource.google/go/x/text/+/v0.43.0:LICENSE) | v0.43.0 | BSD-3-Clause | Copyright 2009 The Go Authors. | no |
 | [google.golang.org/genproto/googleapis/api](https://github.com/googleapis/go-genproto/blob/0afa2a65878a/googleapis/api/LICENSE) | v0.0.0-20260720211330-0afa2a65878a | Apache-2.0 | Copyright 2025 Google LLC (source headers) | no |
 | [google.golang.org/genproto/googleapis/rpc/status](https://github.com/googleapis/go-genproto/blob/0afa2a65878a/googleapis/rpc/LICENSE) | v0.0.0-20260720211330-0afa2a65878a | Apache-2.0 | Copyright 2026 Google LLC (source headers) | no |
 | [google.golang.org/grpc](https://github.com/grpc/grpc-go/blob/v1.84.0/LICENSE) | v1.84.0 | Apache-2.0 | Copyright 2014 gRPC authors. | yes |
