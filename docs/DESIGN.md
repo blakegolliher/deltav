@@ -165,7 +165,8 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     API shows the error and the age of the data. A target that suddenly resolves to no endpoints
     is not believed until three polls in a row agree: a pool does not normally lose every VIP at
     once, and Envoy's health checks already cover endpoints that are really gone.
-24. **A restart changes nothing either.** The endpoints served are cached beside the state file,
+24. **A restart changes nothing either** (for a target served empty, and after a failed save of
+    the cache, only since 76). The endpoints served are cached beside the state file,
     and the first snapshot is built from that cache before any listener opens. Without it, an
     Envoy reconnecting to a restarted daemon would be handed a config with its targets missing
     and would drop its listeners until the first poll. A target with neither a cache nor a
@@ -641,6 +642,34 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
     - An error body echoing a token was redacted only after it was cut to 200 characters, so
       a token straddling the cut kept its start. The whole body is now redacted, of the
       refresh token too, before the cut, which falls on a character boundary.
+76. **The poller, after the review of 2026-11-23** (findings S3, C3, C4, C5, C8). Four holes in
+    23, 24 and 67, and one wait:
+    - The cache wrote a target only through its endpoints, so a target served with none (an
+      empty pool, every CNode drained) had no entry, and after a restart without VAST had no
+      listener: its clients were refused, not answered 503. An empty list is now written and
+      read back, and the target is served empty again. One never served still is not.
+    - The cache was saved only when the config changed. One failed write left it stale until
+      the config next changed, and a DNS suffix with no rule to render it changes no config.
+      The poller now keeps what it last saved and saves whenever that differs, warning once
+      per config while saving fails. A `served.json` that cannot be read at startup is
+      logged, not quietly taken as empty. Neither shows in the API yet.
+    - After a restart, a first poll that read the pools but not `dns/` replaced the suffixes
+      restored from the cache with none, and bucket rules, blocks included, missed requests
+      naming the bucket in the host. Until `dns/` has been read in this process, a failed
+      read keeps the restored suffixes (pool labels come from the pools just read). Any
+      successful read, empty or not, replaces them.
+    - A poll stored its results by cluster name and cleaned up against the list it started
+      with. A cluster attached during a poll lost its view (a target added to it got 503),
+      and a late answer from a detached cluster landed on a new one of the same name, whose
+      targets were served the old one's VIPs. Attach and detach now move a per-cluster
+      generation on; a result whose cluster's generation has moved on is dropped.
+    - Clusters were read one after another and applied at the end, so a change read from a
+      healthy cluster waited for every slower one, up to 45 s each. Up to four are now read
+      at once, and each answer is applied as it comes.
+    Also: a state file of a newer version than this build writes is refused and left as it
+    is; until now the next save dropped what the build did not know and kept the newer
+    version number. Fields unknown within a version are still tolerated. `poller.poke`,
+    never called, is gone.
 
 ## Known gaps (POC)
 
