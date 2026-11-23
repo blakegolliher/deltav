@@ -8,7 +8,8 @@ BINDIR   := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -s -w -X deltav/internal/version.Version=$(VERSION)
 
-# Pinned upstream Envoy release; keep in step with internal/version and README.
+# Pinned upstream Envoy release; keep in step with internal/version, README
+# and scripts/demo.sh.
 # The integration tests run this release binary (Linux only). The checksums
 # are the SHA-256 digests GitHub publishes for the release assets.
 ENVOY_VERSION := 1.40.2
@@ -36,7 +37,7 @@ TAILWIND_URL  := https://github.com/tailwindlabs/tailwindcss/releases/download/v
 CSS_IN  := internal/webui/tailwind.css
 CSS_OUT := internal/webui/static/app.css
 
-.PHONY: all build test test-short race vet licenses license-report envoy integration live tailwind css install uninstall clean
+.PHONY: all build dist test test-short race vet licenses license-report envoy integration live tailwind css install uninstall clean
 
 all: build
 
@@ -45,6 +46,29 @@ build:
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BINDIR)/deltav ./cmd/deltav
 	ln -sf deltav $(BINDIR)/dv
 	$(GO) build -trimpath -o $(BINDIR)/dvlab ./cmd/dvlab
+
+# Release tarballs in dist/, one per Linux architecture, and their checksums.
+# Each holds deltav, dv and dvlab, built without cgo so that they run on any
+# distribution; demo.sh, which runs the whole arrangement on one host; the
+# fixtures the mock VAST API serves; the docs and every license. On a tagged
+# commit the tarballs are named after the tag.
+DIST_ARCHES ?= amd64 arm64
+
+dist: licenses
+	rm -rf dist && mkdir -p dist
+	set -e; for arch in $(DIST_ARCHES); do \
+		d=dist/deltav-$(VERSION)-linux-$$arch; \
+		mkdir -p $$d/testdata/vast; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $$d/deltav ./cmd/deltav; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath -ldflags '-s -w' -o $$d/dvlab ./cmd/dvlab; \
+		ln -s deltav $$d/dv; \
+		cp scripts/demo.sh README.md LICENSE THIRD_PARTY_LICENSES.md $$d/; \
+		cp -r docs third_party $$d/; \
+		cp -r testdata/vast/v5.5.3 $$d/testdata/vast/; \
+		tar -C dist --sort=name --owner=0 --group=0 --numeric-owner -czf $$d.tar.gz $$(basename $$d); \
+		rm -rf $$d; \
+	done
+	cd dist && sha256sum *.tar.gz > SHA256SUMS
 
 test: vet licenses
 	$(GO) test ./...
@@ -140,4 +164,4 @@ uninstall:
 	rm -f $(DESTDIR)$(UNITDIR)/deltav.service $(DESTDIR)$(UNITDIR)/deltav-envoy.service
 
 clean:
-	rm -rf $(BINDIR)
+	rm -rf $(BINDIR) dist

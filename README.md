@@ -34,7 +34,11 @@ The binary is `deltav`, also installed as `dv`; the two behave identically.
 make build        # bin/deltav and the bin/dv symlink
 make test         # vet, license gate, tests
 sudo make install # /usr/local/bin/deltav and dv
+make dist         # release tarballs for Linux amd64 and arm64, in dist/
 ```
+
+A release tarball holds the binaries built that way, static, so nothing has to be built or
+installed to try it: unpack one and run `./demo.sh` (see "Try it without a VAST cluster").
 
 `go build ./cmd/deltav` also works on its own: the web UI's stylesheet is committed. After
 changing a page template or `internal/webui/tailwind.css`, run `make css`, which fetches the
@@ -344,7 +348,19 @@ that requires it, `DELTAV_API_TOKEN`. The list commands take `--json`.
 
 ## Try it without a VAST cluster
 
-On Linux every `127.x.y.z` address is loopback, so fake backends can share one port the way VIPs do.
+One script runs the whole arrangement on a Linux host: six fake S3 backends as the VIPs of a
+mock VAST cluster, the daemon, three real Envoys and a steady load. It prints where the web UI
+is and a few commands to try, and Ctrl-C stops all of it.
+
+```sh
+make build && scripts/demo.sh        # in a release tarball: ./demo.sh
+```
+
+It fetches the pinned Envoy binary if `make envoy` has not, and checks it. The ports it uses,
+and how to move them, are at the top of the script.
+
+The same by hand, a piece at a time. On Linux every `127.x.y.z` address is loopback, so fake
+backends can share one port the way VIPs do.
 
 ```sh
 make build envoy                      # also fetches and verifies the pinned Envoy binary
