@@ -127,7 +127,6 @@ type poller struct {
 	s        *Server
 	interval time.Duration
 	newAPI   func(state.Cluster) (vast.API, error)
-	kick     chan struct{}
 
 	pollMu  sync.Mutex // one poll at a time
 	applyMu sync.Mutex // one apply at a time: compute and publish together
@@ -153,7 +152,7 @@ func newPoller(s *Server, interval time.Duration) *poller {
 		interval = DefaultVASTPollInterval
 	}
 	p := &poller{
-		s: s, interval: interval, kick: make(chan struct{}, 1),
+		s: s, interval: interval,
 		apis: map[string]apiEntry{}, views: map[string]*clusterView{},
 		served: map[string][]xds.Endpoint{}, hosts: map[string]ratelimit.Hosts{}, empty: map[string]int{}, emptyAt: map[string]time.Time{}, status: map[string]targetStatus{},
 		debounce: map[string]*limit.Debouncer{}, now: time.Now,
@@ -193,14 +192,6 @@ func newPoller(s *Server, interval time.Duration) *poller {
 	return p
 }
 
-// poke asks for a poll now instead of at the next tick.
-func (p *poller) poke() {
-	select {
-	case p.kick <- struct{}{}:
-	default:
-	}
-}
-
 func (p *poller) run(ctx context.Context) {
 	tick := time.NewTicker(p.interval)
 	defer tick.Stop()
@@ -210,7 +201,6 @@ func (p *poller) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-		case <-p.kick:
 		}
 	}
 }
