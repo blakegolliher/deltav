@@ -44,8 +44,11 @@ type clusterView struct {
 	// DNS is the cluster's DNS settings, and DNSErr why the latest poll
 	// could not read them ("" if it could). They are read apart from the
 	// rest and their failure fails nothing: DNS then stays as last read.
-	DNS    []vast.DNS
-	DNSErr string
+	// DNSRead is whether they have been read at all in this process; until
+	// they have, the suffixes restored from the cache stay.
+	DNS     []vast.DNS
+	DNSErr  string
+	DNSRead bool
 }
 
 // hosts is where VAST would find a bucket in a host name: under the
@@ -257,6 +260,8 @@ func fetch(ctx context.Context, api vast.API) (*clusterView, error) {
 	// may read pools may not be allowed to read this.
 	if view.DNS, err = api.ListDNS(ctx); err != nil {
 		view.DNS, view.DNSErr = nil, err.Error()
+	} else {
+		view.DNSRead = true
 	}
 	return view, nil
 }
@@ -285,7 +290,7 @@ func (p *poller) pollOnce(ctx context.Context) {
 			view.At = now
 			if view.DNSErr != "" {
 				if old != nil {
-					view.DNS = old.DNS
+					view.DNS, view.DNSRead = old.DNS, old.DNSRead
 				}
 				if old == nil || old.DNSErr == "" {
 					p.s.log.Warn("cannot read the cluster's DNS settings; rate rules will not see a bucket named in a host name unless they were read before",
@@ -436,7 +441,13 @@ func (p *poller) apply(ctx context.Context) (version string, changed bool, err e
 			}
 			eps, st.Held = prev, true
 		default:
-			p.hosts[t.Name] = view.hosts()
+			hosts := view.hosts()
+			if !view.DNSRead {
+				// No DNS read yet: keep the suffixes the cache restored
+				// rather than none. Pools were read; they are taken.
+				hosts.Suffixes = p.hosts[t.Name].Suffixes
+			}
+			p.hosts[t.Name] = hosts
 			eps, st = resolve(t, view, drained[t.Cluster])
 			if view.DNSErr != "" {
 				st.BucketHostsProblem = "the cluster's DNS settings could not be read: " + view.DNSErr
