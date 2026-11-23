@@ -44,10 +44,21 @@ for p in $PLATFORMS; do
 		>>"$tmp/all.tsv" || { cat "$tmp/err" >&2; echo "go-licenses failed for $p" >&2; exit 1; }
 done
 # Merge per-license rows into one row per library: licenses joined with " AND ".
-sort -u "$tmp/all.tsv" | grep -v '^[[:space:]]*$' | awk -F'\t' -v OFS='\t' '
+# awk skips blank lines itself (grep -v would exit 1 on none left), so a
+# failure anywhere in the pipeline stops the gate rather than empty it.
+sort -u "$tmp/all.tsv" | awk -F'\t' -v OFS='\t' '
+	/^[[:space:]]*$/ { next }
 	{ k = $1 OFS $2; if (!(k in lic)) { order[++n] = k; path[k] = $4; url[k] = $5; lic[k] = $3 }
 	  else if (index(" AND " lic[k] " AND ", " AND " $3 " AND ") == 0) lic[k] = lic[k] " AND " $3 }
-	END { for (i = 1; i <= n; i++) { k = order[i]; print k, lic[k], path[k], url[k] } }' > "$tmp/libs.tsv" || true
+	END { for (i = 1; i <= n; i++) { k = order[i]; print k, lic[k], path[k], url[k] } }' > "$tmp/libs.tsv" ||
+	{ echo "merging the license inventory failed" >&2; exit 1; }
+# An empty inventory means go-licenses saw nothing, not that all is well;
+# in report mode it would also replace the shipped notices with none.
+count=$(wc -l < "$tmp/libs.tsv" | tr -d ' ')
+if [ "$count" -eq 0 ]; then
+	echo "license check FAILED: go-licenses reported no libraries" >&2
+	exit 1
+fi
 
 bad=0
 while IFS="$(printf '\t')" read -r name ver lic lpath url <&3; do
@@ -59,7 +70,6 @@ while IFS="$(printf '\t')" read -r name ver lic lpath url <&3; do
 		esac
 	done
 done 3< "$tmp/libs.tsv"
-count=$(wc -l < "$tmp/libs.tsv" | tr -d ' ')
 if [ "$bad" -ne 0 ]; then
 	echo "license check FAILED ($count libraries)" >&2
 	exit 1
