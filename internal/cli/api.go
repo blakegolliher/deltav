@@ -53,11 +53,21 @@ func (f *apiFlags) do(cmd *cobra.Command, method, path string, in, out any) erro
 	if f.token != "" {
 		req.Header.Set("Authorization", "Bearer "+f.token)
 	}
-	resp, err := (&http.Client{Timeout: 2 * time.Minute}).Do(req)
+	// Redirects are not followed: one would carry the token and the body
+	// (a VAST password, say) elsewhere, and a 301-303 turns a change into
+	// a GET whose success would be reported as the change's.
+	hc := &http.Client{
+		Timeout:       2 * time.Minute,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("cannot reach the daemon at %s: %w (is \"%s serve\" running? see --api)", f.base, err, cmd.Root().Name())
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
+		return fmt.Errorf("%s %s: status %d, a redirect to %q, which is not followed: point --api at the daemon itself", method, path, resp.StatusCode, resp.Header.Get("Location"))
+	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err

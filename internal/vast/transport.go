@@ -2,7 +2,9 @@
 //
 // Hard rule: against a VAST cluster Delta-V issues only token calls and
 // GETs. The rule is enforced here, in the HTTP transport, so no caller can
-// break it by mistake and redirects are checked like any other request.
+// break it by mistake and each redirect hop is checked for method and path
+// like any other request. The transport does not check scheme or host:
+// the client's redirect policy (sameOrigin) keeps redirects on the origin.
 package vast
 
 import (

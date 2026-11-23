@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 // fakeVAST is a stand-in for the management API's token and GET behaviour.
@@ -194,11 +195,37 @@ func TestRedirectedRequestsAreChecked(t *testing.T) {
 	c := f.client(t, nil)
 	var out []cnode
 	err := c.Get(context.Background(), "cnodes/", &out)
-	if err == nil || !strings.Contains(err.Error(), "refused POST /api/cnodes/add_cnodes/") {
+	if err == nil || !strings.Contains(err.Error(), "refused a redirect of POST /api/token/") {
 		t.Fatalf("got %v", err)
 	}
 	if got := f.seen(); len(got) != 1 || got[0] != "POST /api/token/" {
 		t.Fatalf("the server received %v, want only the token call", got)
+	}
+}
+
+func TestSameOriginGetRedirectIsFollowed(t *testing.T) {
+	f := newFakeVAST(t)
+	f.handlers["GET /api/old/"] = func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, f.srv.URL+"/api/cnodes/", http.StatusMovedPermanently)
+	}
+	c := f.client(t, nil)
+	var out []cnode
+	if err := c.Get(context.Background(), "old/", &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("decoded %+v", out)
+	}
+	want := []string{"POST /api/token/", "GET /api/old/", "GET /api/cnodes/"}
+	if got := f.seen(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("requests: %v\n    want: %v", got, want)
+	}
+}
+
+func TestSnippetCutsOnACharacter(t *testing.T) {
+	s := snippet(strings.Repeat("a", 199) + strings.Repeat("é", 10))
+	if !utf8.ValidString(s) || !strings.HasSuffix(s, strings.Repeat("a", 199)+"…") {
+		t.Fatalf("got %q", s)
 	}
 }
 

@@ -279,22 +279,37 @@ type FleetQuery struct {
 type Client struct {
 	Base  string // e.g. http://127.0.0.1:18080
 	Token string // bearer token, if the daemon requires one
-	// HTTP makes the requests; nil means http.DefaultClient.
+	// HTTP makes the requests; nil means a client that follows no
+	// redirects.
 	HTTP *http.Client
 }
+
+// noRedirects is the default client. A followed redirect would carry the
+// token and the body (AddCluster's VAST password) elsewhere, and a 301-303
+// turns a change into a GET whose success would be reported as the
+// change's. The daemon's API never redirects, so any 3xx is an error.
+var noRedirects = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 func (c *Client) http() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return http.DefaultClient
+	return noRedirects
+}
+
+// redirected returns an error for a 3xx response, naming where it points.
+func redirected(what string, resp *http.Response) error {
+	if resp.StatusCode < 300 || resp.StatusCode > 399 {
+		return nil
+	}
+	return fmt.Errorf("%s: status %d, a redirect to %q, which is not followed: point the client at the daemon itself", what, resp.StatusCode, resp.Header.Get("Location"))
 }
 
 // InProcess returns a client that calls an API handler directly, with no
 // network in between. The web UI, which runs inside the daemon, uses it: it
 // then sees exactly what any other API client sees and nothing more.
 func InProcess(api http.Handler) *Client {
-	return &Client{Base: "http://deltav.internal", HTTP: &http.Client{Transport: handlerTransport{api}}}
+	return &Client{Base: "http://deltav.internal", HTTP: &http.Client{Transport: handlerTransport{api}, CheckRedirect: noRedirects.CheckRedirect}}
 }
 
 type handlerTransport struct{ h http.Handler }
@@ -360,6 +375,9 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 		return fmt.Errorf("cannot reach the daemon at %s: %w", c.Base, err)
 	}
 	defer resp.Body.Close()
+	if err := redirected("GET "+path, resp); err != nil {
+		return err
+	}
 	if resp.StatusCode != http.StatusOK {
 		var e struct {
 			Error string `json:"error"`
@@ -477,6 +495,9 @@ func (c *Client) send(ctx context.Context, method, path string, body any) error 
 		return fmt.Errorf("cannot reach the daemon at %s: %w", c.Base, err)
 	}
 	defer resp.Body.Close()
+	if err := redirected(method+" "+path, resp); err != nil {
+		return err
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 		return nil
 	}
@@ -625,6 +646,9 @@ func (c *Client) stream(ctx context.Context, interval time.Duration, emit func(*
 		return fmt.Errorf("cannot reach the daemon at %s: %w", c.Base, err)
 	}
 	defer resp.Body.Close()
+	if err := redirected("event stream", resp); err != nil {
+		return err
+	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusUnauthorized {
 			return fmt.Errorf("the daemon requires a token: set DELTAV_API_TOKEN or --api-token")

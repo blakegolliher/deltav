@@ -14,6 +14,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+)
+
+// Response size limits. A VAST cluster is trusted, but a buggy VMS or a
+// proxy in front of it must not exhaust the daemon's memory, which would
+// take the control plane down for the whole fleet. Only an inventory list
+// is large; a token response is small, and of an error only a snippet is
+// kept.
+const (
+	maxInventoryBytes = 64 << 20 // a 200 response to a GET
+	maxSmallBytes     = 1 << 20  // a token response, and any non-200 body
 )
 
 // Options describe one VAST cluster's management endpoint.
@@ -62,8 +73,41 @@ func New(o Options) (*Client, error) {
 	return &Client{
 		base: "https://" + host,
 		opts: o,
-		http: &http.Client{Transport: readOnly{next: tr}, Timeout: o.Timeout},
+		http: &http.Client{Transport: readOnly{next: tr}, Timeout: o.Timeout, CheckRedirect: sameOrigin},
 	}, nil
+}
+
+// sameOrigin is the client's redirect policy. A token call is never
+// redirected: it carries the password or the refresh token, and a
+// redirected login would adopt tokens minted by whoever answered. A GET may
+// be redirected only within the origin it was sent to, scheme and port
+// included: Go keeps the Authorization header whenever the host name stays
+// the same, even from https to http, and whatever answered elsewhere would
+// be taken for the cluster's inventory. readOnly still checks every hop.
+func sameOrigin(req *http.Request, via []*http.Request) error {
+	first := via[0]
+	if first.Method != http.MethodGet {
+		return fmt.Errorf("refused a redirect of %s %s", first.Method, first.URL.Path)
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if req.URL.Scheme != first.URL.Scheme || !strings.EqualFold(req.URL.Hostname(), first.URL.Hostname()) ||
+		effectivePort(req.URL) != effectivePort(first.URL) {
+		return fmt.Errorf("refused a redirect to %s://%s: it leaves %s://%s", req.URL.Scheme, req.URL.Host, first.URL.Scheme, first.URL.Host)
+	}
+	return nil
+}
+
+// effectivePort is u's port, or the default for its scheme.
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if u.Scheme == "http" {
+		return "80"
+	}
+	return "443"
 }
 
 // Get fetches /api/<path> and decodes the JSON response into out. path is
@@ -99,10 +143,15 @@ func (c *Client) GetRaw(ctx context.Context, path string) ([]byte, error) {
 		}
 	}
 	if status != http.StatusOK {
-		// Should a server echo the request's token in its error, keep it
-		// out of ours.
-		detail := strings.ReplaceAll(snippet(body), token, "[token]")
-		return nil, fmt.Errorf("vast: GET %s: status %d: %s", apiPath(path), status, detail)
+		// Should a server echo a token in its error, keep it out of ours.
+		// Redact before truncating, or the start of a token survives.
+		detail := strings.ReplaceAll(string(body), token, "[token]")
+		c.mu.Lock()
+		if c.refresh != "" {
+			detail = strings.ReplaceAll(detail, c.refresh, "[token]")
+		}
+		c.mu.Unlock()
+		return nil, fmt.Errorf("vast: GET %s: status %d: %s", apiPath(path), status, snippet(detail))
 	}
 	return body, nil
 }
@@ -118,18 +167,26 @@ func (c *Client) get(ctx context.Context, path, token string) (int, []byte, erro
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	return c.do(req)
+	return c.do(req, maxInventoryBytes)
 }
 
-func (c *Client) do(req *http.Request) (int, []byte, error) {
+// do sends req and reads the response: up to limit bytes of a 200, and
+// maxSmallBytes of anything else. A longer response is an error.
+func (c *Client) do(req *http.Request, limit int64) (int, []byte, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("vast: %s %s: %w", req.Method, req.URL.Path, scrub(err))
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		limit = maxSmallBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return 0, nil, fmt.Errorf("vast: %s %s: reading the response: %w", req.Method, req.URL.Path, err)
+	}
+	if int64(len(body)) > limit {
+		return 0, nil, fmt.Errorf("vast: %s %s: status %d: response larger than %d bytes", req.Method, req.URL.Path, resp.StatusCode, limit)
 	}
 	return resp.StatusCode, body, nil
 }
@@ -145,12 +202,17 @@ func scrub(err error) error {
 	return err
 }
 
-// snippet returns the start of a response body for an error message.
-func snippet(body []byte) string {
+// snippet returns the start of a response body for an error message, cut
+// on a character boundary.
+func snippet(body string) string {
 	const max = 200
-	s := strings.Join(strings.Fields(string(body)), " ")
+	s := strings.Join(strings.Fields(body), " ")
 	if len(s) > max {
-		s = s[:max] + "…"
+		cut := max
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "…"
 	}
 	return s
 }
@@ -225,7 +287,7 @@ func (c *Client) post(ctx context.Context, path string, in, out any) (int, error
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	status, body, err := c.do(req)
+	status, body, err := c.do(req, maxSmallBytes)
 	if err != nil {
 		return 0, err
 	}

@@ -22,7 +22,9 @@ cobra 1.10 · Prometheus client 1.25 · Bubble Tea / Lip Gloss v2.1.1, Bubbles v
   1 m / 5 m / 1 h windows, one rollup per endpoint and one per fleet member (not the
   cross-product). No dependency is needed for this. Amendment 18 has the details.
 - VAST access: a read-only `RoundTripper` allows only `GET` and the `POST`s to `/api/token/...`.
-  Because it sits in the transport, redirected requests are checked too.
+  Because it sits in the transport, each redirect hop is checked too, for method and path only.
+  The client's redirect policy does the rest: no redirect of a token call, and a `GET` only
+  within the configured origin (amendment 75).
 
 ## Amendments
 
@@ -613,6 +615,29 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
       and republishes every type under a fresh version on the next update, identical input
       or not. In production the only way `SetSnapshot` fails is a cancelled context, which
       today means daemon shutdown; the guard matters once a caller passes a shorter one.
+75. **Redirects and response sizes, after the review of 2026-11-23** (findings S2, S5).
+    - The VAST client followed any redirect Go would. A token call redirected with 307 or 308
+      sent the password or the refresh token on to wherever it pointed, http included; with
+      301-303 it adopted the tokens the other end minted. Go keeps `Authorization` whenever
+      the host name stays the same, so a GET redirected to another port or to http carried
+      the access token, and any answer was taken for inventory. The transport's read-only
+      check sees method and path only. The client now refuses every redirect of a token call,
+      and a GET's unless scheme, host and port all stay those of the configured endpoint; a
+      refused redirect is an error.
+    - The CLI and the API client (the terminal UI's) follow no redirects at all, and report a
+      3xx as an error naming its `Location`. Followed, a redirect carried the daemon's API
+      token and a request body (`vast add` sends a VAST password) elsewhere, and a 301-303
+      turned a change into a GET whose 200 was reported as the change done. The daemon's API
+      never redirects.
+    - VAST responses were read whole. They are now read through a limit: 64 MiB for a 200
+      to a GET, 1 MiB for a token response and for any other status, of which only 200
+      characters are kept. Over the limit is an error and nothing is decoded; the poller
+      keeps the last good inventory, as for any failed poll. The VMS is trusted, but a buggy
+      one or a proxy before it should not exhaust the memory of the daemon the whole fleet
+      depends on. 64 MiB is meant to be generous; real inventories have not been measured.
+    - An error body echoing a token was redacted only after it was cut to 200 characters, so
+      a token straddling the cut kept its start. The whole body is now redacted, of the
+      refresh token too, before the cut, which falls on a character boundary.
 
 ## Known gaps (POC)
 
