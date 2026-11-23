@@ -4,7 +4,9 @@ package xds
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -43,6 +45,11 @@ type Server struct {
 	digest   [sha256.Size]byte
 	targets  []TargetSpec
 	snapshot cache.Snapshot // what the cache currently holds
+	// dirty is set while the cache may hold something other than version:
+	// from the start of a publish until all four types are in. Update then
+	// republishes even input identical to the last complete one, so going
+	// back to it after a failed publish is not mistaken for a no-op.
+	dirty bool
 }
 
 // New builds an ADS server whose snapshot holds no targets yet. callbacks
@@ -65,7 +72,7 @@ func New(ctx context.Context, log *slog.Logger, callbacks serverv3.Callbacks) (*
 		// the cache answers only if its own differs. A bare counter would
 		// restart at 1 with the daemon and could collide with a version
 		// Envoy kept from the previous run, leaving it on stale config.
-		epoch: strconv.FormatInt(time.Now().Unix(), 36),
+		epoch: newEpoch(),
 	}
 	// An empty snapshot rather than none: Envoys that connect before any
 	// target exists get an answer to ACK instead of waiting on a timeout.
@@ -73,6 +80,19 @@ func New(ctx context.Context, log *slog.Logger, callbacks serverv3.Callbacks) (*
 		return nil, err
 	}
 	return s, nil
+}
+
+// newEpoch names this process's run of versions: its start time, which
+// keeps versions readable, and random bits, so two runs started in the same
+// second still differ (DESIGN.md, amendments 16 and 74).
+func newEpoch() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand does not fail on supported platforms; nanoseconds are
+		// still far less likely to repeat than seconds.
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return strconv.FormatInt(time.Now().Unix(), 36) + "-" + hex.EncodeToString(b[:])
 }
 
 // Register adds the ADS service to a gRPC server.
@@ -121,17 +141,18 @@ func (s *Server) Update(ctx context.Context, targets []TargetSpec) (version stri
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.version != "" && digest == s.digest {
+	if s.version != "" && !s.dirty && digest == s.digest {
 		return s.version, false, nil
 	}
 	// The counter advances even if publishing fails part-way, so a version
 	// string is never reused for different content.
 	s.seq++
 	next := fmt.Sprintf("%s.%d", s.epoch, s.seq)
+	s.dirty = true
 	if err := s.publish(ctx, next, clusters, endpoints, listeners, routes); err != nil {
 		return "", false, err
 	}
-	s.version, s.digest, s.targets = next, digest, targets
+	s.version, s.digest, s.targets, s.dirty = next, digest, targets, false
 	return next, true, nil
 }
 

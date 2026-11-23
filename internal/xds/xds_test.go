@@ -66,8 +66,7 @@ func TestUpdateVersions(t *testing.T) {
 // a restart reports the version it holds, and is only sent config if the
 // daemon's differs.
 func TestVersionsDifferAcrossServers(t *testing.T) {
-	a, b := newTestServer(t), newTestServer(t)
-	b.epoch = a.epoch + "x" // two servers built in the same second
+	a, b := newTestServer(t), newTestServer(t) // built within the same second
 	va, _, _ := a.Update(context.Background(), []TargetSpec{testTarget()})
 	vb, _, _ := b.Update(context.Background(), []TargetSpec{testTarget()})
 	if va == vb {

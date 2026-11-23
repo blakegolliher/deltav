@@ -109,7 +109,8 @@ is unsigned, so SigV4 is unaffected; whether VAST reacts to it is to be checked 
     own channel in random order. The order is best effort: a stream with an ACK in flight is
     answered when the ACK lands. So routes set `validate_clusters: false`; a listener that arrives
     before its cluster answers 503 for that moment instead of being rejected for good.
-16. **Config versions are unique to a daemon run** (`<start time>.<counter>`). A reconnecting Envoy
+16. **Config versions are unique to a daemon run** (`<start time>-<random>.<counter>`; the
+    random part since amendment 74). A reconnecting Envoy
     reports the version it holds and is sent config only if the daemon's differs, so a counter
     that restarted at 1 could leave Envoys on stale config after a daemon restart. An update whose
     rendered resources are identical to the current ones is not pushed at all.
@@ -599,6 +600,19 @@ Asked for by the user on 2026-11-18: "rate limiting like tollbooth". Not in the 
       rule's, and shows the names under it.
     What this did not show: any other SDK; these clients over TLS; anything at a rate that
     would stress Envoy or the cluster (the uploads were 64 MiB).
+74. **Publishing, after the review of 2026-11-23** (findings C1, C2). Two holes in 16:
+    - A daemon restarted within the same second as its previous run took the same epoch, so
+      different config could carry the same version. A reconnecting Envoy is still answered
+      when the type has resources (its new subscription has been "returned" nothing), but
+      a type with none at that version was held back, leaving the Envoy on the old run's
+      clusters and listeners. The epoch now carries 32 random bits after the start time.
+    - A publish that failed part-way (four `SetSnapshot` calls, one per type) left the cache
+      holding the new config for the types already written, the failing one included, while
+      `Version()` still named the old. Going back to the old config was then taken for a
+      no-op. The server now remembers that the cache may differ from what it last completed,
+      and republishes every type under a fresh version on the next update, identical input
+      or not. In production the only way `SetSnapshot` fails is a cancelled context, which
+      today means daemon shutdown; the guard matters once a caller passes a shorter one.
 
 ## Known gaps (POC)
 
