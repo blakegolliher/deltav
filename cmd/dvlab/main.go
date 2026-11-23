@@ -196,6 +196,9 @@ func loadgenCmd() *cobra.Command {
 			"--roundtrip the run only reports.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cfg.Size < 0 {
+				return fmt.Errorf("--size %d: the size must be 0 or more", cfg.Size)
+			}
 			creds, err := credentials(access, secret, region)
 			if err != nil {
 				return err

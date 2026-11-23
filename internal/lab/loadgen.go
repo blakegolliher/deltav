@@ -152,6 +152,9 @@ func RunLoad(ctx context.Context, cfg LoadConfig) (*LoadResult, error) {
 	if cfg.PutRatio < 0 || cfg.PutRatio > 1 {
 		return nil, errors.New("the PUT ratio must be between 0 and 1")
 	}
+	if cfg.Size < 0 {
+		return nil, errors.New("the size must be 0 or more")
+	}
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 4
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +43,27 @@ func TestReviewM1_CheckFailsWhenEveryDialFails(t *testing.T) {
 	err := cmd.ExecuteContext(context.Background())
 	if err == nil {
 		t.Errorf("loadgen --check with every request failing to dial returned success (exit status 0)")
+	}
+}
+
+// TestReviewM6_NegativeSizeIsRejected: a negative --size must be refused
+// with an error, not reach make([]byte, n).
+func TestReviewM6_NegativeSizeIsRejected(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	reviewQuietStdout(t)
+	cmd := loadgenCmd()
+	cmd.SetArgs([]string{"--endpoint", "http://" + reviewClosedPort(t), "--bucket", "b", "--requests", "1", "--size", "-1"})
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("--size -1 panicked: %v", r)
+			}
+		}()
+		err = cmd.ExecuteContext(context.Background())
+	}()
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "size") {
+		t.Errorf("--size -1: err = %v, want an error naming the size", err)
 	}
 }

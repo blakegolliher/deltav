@@ -285,6 +285,7 @@ func TestRunLoadRejectsBadConfig(t *testing.T) {
 		{Endpoint: "http://127.0.0.1:9000", Bucket: "a/b", Requests: 1},
 		{Endpoint: "http://127.0.0.1:9000", Bucket: "b"},
 		{Endpoint: "http://127.0.0.1:9000", Bucket: "b", Requests: 1, PutRatio: 1.5},
+		{Endpoint: "http://127.0.0.1:9000", Bucket: "b", Requests: 1, Size: -1},
 	} {
 		if _, err := RunLoad(context.Background(), cfg); err == nil {
 			t.Errorf("%+v: want an error", cfg)
