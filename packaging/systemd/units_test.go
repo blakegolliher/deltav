@@ -42,6 +42,11 @@ func TestDaemonUnit(t *testing.T) {
 	if !strings.Contains(DaemonEnv, "DELTAV_API_TOKEN") || regexp.MustCompile(`(?m)^[A-Z_]+=`).MatchString(DaemonEnv) {
 		t.Error("the example environment file should name the token and set nothing by itself")
 	}
+	// systemd runs no commands in an EnvironmentFile: an example such as
+	// DELTAV_API_TOKEN=$(openssl rand -hex 32) would set that text.
+	if regexp.MustCompile("(?m)^#?\\s*[A-Z_]+=.*(\\$\\(|\\$\\{|`)").MatchString(DaemonEnv) {
+		t.Error("the example environment file shows a shell expansion as a value; systemd would not expand it")
+	}
 }
 
 // The client unit's command line is run for real by the integration tests.

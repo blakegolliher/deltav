@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,6 +112,11 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	if cfg.APIToken == "" && !isLoopback(cfg.HTTPAddr) {
 		return nil, fmt.Errorf("--http-addr %s is not loopback: set an API token (DELTAV_API_TOKEN)", cfg.HTTPAddr)
+	}
+	// systemd's EnvironmentFile runs no commands, so a token written as
+	// $(openssl rand -hex 32) arrives as that text, which anyone can read.
+	if strings.Contains(cfg.APIToken, "$(") || strings.Contains(cfg.APIToken, "${") || strings.Contains(cfg.APIToken, "`") {
+		return nil, errors.New("the API token looks like an unexpanded shell command; run the command in a shell and set the token to its output")
 	}
 	log := cfg.Logger
 	if log == nil {
