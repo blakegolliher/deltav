@@ -140,7 +140,13 @@ func TestRateRulesThroughEnvoy(t *testing.T) {
 	setRule := func(name string, body map[string]any) {
 		t.Helper()
 		sendAPI(t, s, http.MethodPut, "/api/v1/rules/"+name, body)
-		waitMember(t, s, "it-envoy-1", "in sync with the rules", inSync)
+		// Every Envoy, not just the first: once a second one shares the
+		// port, a request can land on either.
+		for _, m := range getFleet(t, s).Members {
+			if m.Connected {
+				waitMember(t, s, m.NodeID, "in sync with the rules", inSync)
+			}
+		}
 	}
 
 	// GetObject is limited to 20 a second for each access key; nothing
