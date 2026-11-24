@@ -140,9 +140,11 @@ deltav target list
 
 Every Envoy then listens on `127.0.0.1:9000` and balances across the pool's VIPs that sit on
 healthy CNodes. The daemon reads the cluster every 10 s with four GETs; it can issue nothing
-but GETs and the token call. If VAST is unreachable, or the daemon restarts, Envoys keep being
-served the last known endpoints. TLS verification of the VAST API is on unless the cluster is
-added with `--insecure`.
+but GETs and the token call. It follows no redirect of the token call, and redirects of a GET
+only to the same scheme, host and port. With several clusters attached, up to four are read at
+once, so one slow cluster does not hold up the others. If VAST is unreachable, or the daemon
+restarts, Envoys keep being served the last known endpoints. TLS verification of the VAST API
+is on unless the cluster is added with `--insecure`.
 
 ### TLS to the VIPs
 
@@ -334,10 +336,13 @@ another machine, tunnel to it: `ssh -L 18080:127.0.0.1:18080 <daemon host>`, the
 `http://localhost:18080/`.
 
 A daemon bound to anything but loopback requires a token (`DELTAV_API_TOKEN`), and the UI then
-asks for it once and keeps a 12-hour session cookie. Use a long random token, and put TLS in
-front of the daemon if the network is not trusted: it speaks plain HTTP. A daemon with no token
-answers only to loopback names (`127.0.0.1`, `localhost`), and in both cases a request that
-changes anything is refused if a browser says it comes from another site's page.
+asks for it once and keeps a 12-hour session cookie; a live page stops updating when the session
+ends. Use a long random token, and put TLS in front of the daemon if the network is not trusted:
+it speaks plain HTTP. systemd reads the settings file literally, so generate the token in a shell
+(`openssl rand -hex 32`) and paste the output. The daemon refuses to start with a token that
+contains `$(`, `${` or a backtick. A daemon with no token answers only to loopback names
+(`127.0.0.1`, `localhost`), and in both cases a request that changes anything is refused if a
+browser says it comes from another site's page.
 
 ```sh
 deltav tui                    # live terminal UI
@@ -468,7 +473,8 @@ the loopback address verify at the backend.
 These are out of scope for the POC:
 
 - No mutual TLS on the xDS and telemetry streams. Anything that can reach the gRPC port can read
-  config and send telemetry.
+  config and send telemetry. Access-log entries cross that port in clear text, including a
+  presigned URL's signature, which stays usable until the URL expires.
 - No high availability for the daemon. Envoys keep their last config while it is down.
 - No per-group targeting: every Envoy receives every target.
 - No long-term metric storage. Windows are kept in memory for up to 1 h; scrape `/metrics` for
