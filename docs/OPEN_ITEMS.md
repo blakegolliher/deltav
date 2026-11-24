@@ -12,6 +12,11 @@ to 69). The same day TLS to the VIPs ran for the first time, on real Envoy and a
 cluster: it works, except that its default way of trusting a certificate had never been able
 to (70 to 72).
 
+A second review, on 2026-11-23 (an outside one, of the whole repository), made 26 findings,
+a dependency note, a removal and five refactoring suggestions. Each finding was reproduced by
+a test before anything changed; most are fixed, a few wait on the owner. Its section is at
+the end of this file (amendments 74 to 76).
+
 How things here were established: **seen** means observed on real Envoy 1.40.2, **tested**
 means a unit test covers it, **read** means from reading code only.
 
@@ -87,6 +92,19 @@ By design, or by what Envoy's filter does. Each is said in the README or `rule s
 - The gRPC port is unauthenticated (a known gap). Anyone who can reach it can shift shares
   with false usage reports, or add to the refusal record with false log entries.
 
+### Waiting on the owner, from the review of 2026-11-23
+
+- **A presigned URL's signature is in every access-log entry** Envoy sends the daemon (seen):
+  Envoy's gRPC access logger sends the whole path, query included, and cannot be told not to.
+  It crosses the unauthenticated gRPC port in clear. Header-signed requests are not affected.
+- **A change that fails to publish is still answered 2xx** (limit, drain, delete target), and
+  the status already shows it; it is published at the next successful poll (tested). No way
+  to make publishing fail outside shutdown is known.
+- **A drained CNode's history vanishes at once** from `/api/v1/cnodes`: its VIP rows, stats
+  and sparkline (tested).
+- `bootstrap --admin-address` accepts a non-loopback address for Envoy's unauthenticated admin
+  interface (tested); the API token has no minimum length.
+
 ### Tidying the review turned up
 
 - `internal/cli` has its own HTTP client and API types where `internal/apiclient` would do.
@@ -140,3 +158,36 @@ against a real cluster pass as well, over plain HTTP and over TLS (65, 70).
 
 Decided by the owner on 2026-11-19: outlier ejection stays as it is, VAST's own
 `503 SlowDown` included (64).
+
+## The review of 2026-11-23, and what became of it
+
+Severity is the review's, then as found when reproduced. Every outcome below is tested; the
+real-Envoy suite (fourteen tests) passes after them.
+
+| Finding | Outcome |
+|---|---|
+| S1 gRPC port unauthenticated; presigned URLs in access logs | Waiting on the owner (above). The log exposure is seen on real Envoy. |
+| S2 a redirect could take the VAST password, refresh token or access token elsewhere, http included; the CLI and API client followed redirects too (High → Medium) | Fixed (75). |
+| S3 a failed DNS read on the first poll after a restart dropped the bucket host suffixes, and saved that (High → Medium) | Fixed (76). |
+| S4 the example env file showed `$(...)`, which systemd passes as literal text (Medium) | Fixed: wording, and such a token is refused. |
+| S5 VAST responses read without a size limit; a token at the cut survived redaction (Medium → Low) | Fixed (75). |
+| S6 a live stream outlived its browser session (Medium → Low) | Fixed: the request ends with the session. |
+| C1 a publish failing part-way defeated a rollback (High → Low: only at shutdown today) | Fixed (74). |
+| C2 two runs in one second shared config versions (High → Low) | Fixed (74). |
+| C3 a target served empty lost its listener across a restart (Medium → Low) | Fixed (76). |
+| C4 a failed save of the restart cache was never retried (Medium) | Fixed (76). |
+| C5 a poll overwrote a cluster attached or re-attached during it (Medium → Low) | Fixed (76). |
+| C6 a 2xx can hide a change that failed to publish (High → Medium) | Waiting on the owner; failed rollbacks now say so (500). |
+| C7 a limit given with a new target skipped the checks (Medium → Low) | Fixed: one normalization, also on load. |
+| C8 one slow cluster held back every cluster's changes (Medium) | Fixed (76): up to four read at once. |
+| T1 quota reports did work in the square of the fleet (Medium) | Fixed: 1000 Envoys, 91 ms → 5 ms a round (60, item 8 above). |
+| T2 a superseded load-report stream could clear its successor's gauges (Medium → Low) | Fixed. |
+| T3 load-only counters never expired (Medium → Low) | Fixed: each source expires on its own. |
+| T4 a drained CNode's in-flight work disappears from its view (Medium → Low) | Waiting on the owner (above). |
+| T5 the terminal UI could show an answer for an older page, filter or window (Medium) | Fixed; a failed change also keeps its error. |
+| Smaller: `loadgen --check`, state-file version, sanitizer, admin bind, license gate, negative size, trailing JSON | All fixed but the admin bind (owner). The latency list of long `loadgen` runs is unbounded still. |
+| `golang.org/x/net` | Bumped to v0.62.0: five HTTP/2 advisories reachable from the daemon, which the review had not found. |
+| Dead code (`poller.poke`) | Removed. |
+
+The review's refactoring suggestions (split the poller's `apply`, one HTTP client, fixed Lua in
+its own file, in-process handler tests, a cached Controls page) are not taken up yet.
